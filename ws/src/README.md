@@ -143,6 +143,57 @@ ls -lh checkpoints/flip_pillow_lora_smoke/checkpoint-10/
 python ws/src/train_flip_pillow_lora.py train --steps 1000 --save-steps 200
 ```
 
-两种模式分别写 `checkpoints/flip_pillow_lora_smoke` 和 `checkpoints/flip_pillow_lora_train`，遇非空输出目录会停止；新实验可加 `--output checkpoints/flip_pillow_lora_run02`。默认每卡 batch 1、学习率 `1e-5`、禁用 W&B 上报；显存和吞吐确认后才考虑 `--batch-size`。启动器保留 YAM 的 `3 views / 24 actions per block / num_frames=33`、LoRA 和 ZeRO-2，并显式 `fps.yam=50`；将每个数据分片的目标大小设为 2,000 步，以降低多卡三路原始 RGB 解码及预取的**主机内存**占用。这与 GPU 显存是不同的限制。
+两种模式分别写 `checkpoints/flip_pillow_lora_smoke` 和 `checkpoints/flip_pillow_lora_train`，遇非空输出目录会停止；新实验可加 `--output checkpoints/flip_pillow_lora_run02`。默认每卡 batch 1、学习率 `1e-5`、仅写本地日志；希望用 W&B 的话，**不执行上面最后那条 `train`**，改用第 4 节命令，只训练一次。显存和吞吐确认后才考虑 `--batch-size`。启动器保留 YAM 的 `3 views / 24 actions per block / num_frames=33`、LoRA 和 ZeRO-2，并显式 `fps.yam=50`；将每个数据分片的目标大小设为 2,000 步，以降低多卡三路原始 RGB 解码及预取的**主机内存**占用。这与 GPU 显存是不同的限制。
 
 **验收分两层：** 10 步结束、loss 和动作损失有限、写出 `checkpoint-10`，只说明训练管线通了。1,000 步也只是方便比较的第一轮预算，不是最优值。训练入口不会自动构造验证集。后续需在 `holdout.json` 指定的**未参与训练的录制**上，用训练集的统计和 `modality.json` 解码动作，在同一动作空间比较左右臂关节误差和夹爪开合时机；不要直接运行旧 `open_loop_yam.py`。最终另做多种未见枕头起始位置的受控真机测试（限速、有人看护、可急停），记录“翻后红胶带面朝上、松手后枕头在桌面稳定”的成功次数 / 总次数。
+
+### 4. 用 W&B 看已完成的 smoke / 实时看下一轮训练
+
+把本机 `ws/src/train_flip_pillow_lora.py`、`ws/src/import_loss_to_wandb.py` 同步到服务器仓库的 `ws/src/`。以下命令在**之前通过 smoke 的服务器终端**执行。新终端请先恢复同一环境、分配的 GPU、权重和训练集路径。
+
+```bash
+cd /data1/wp_ws/dreamzero-git
+python -c 'import wandb; print(wandb.__version__)'  # 仅在没安装时：python -m pip install wandb
+unset WANDB_DISABLED
+export WANDB_MODE=online WANDB_PROJECT=dreamzero-flip-pillow
+# 若要放入团队空间，可再 export WANDB_ENTITY=你的团队标识
+wandb login  # 在服务器终端交互登录，不要把 API key 写到命令、代码或聊天里
+```
+
+**已完成的 smoke**：原 `report_to=none` 没有创建 W&B run；日志中的 `Copying wandb_config.json` 不是同步成功的提示。无需重跑，把当时的 JSONL 指标导成单独的 run：
+
+```bash
+python ws/src/import_loss_to_wandb.py checkpoints/flip_pillow_lora_smoke/loss_log.jsonl
+```
+
+打开输出的 run 链接，应能看到 `flip_pillow_lora_smoke-imported`。加 `--dry-run` 可只检查点数，不导入；真正导入运行一次即可，重复运行会新建 run。它按真实训练步合并各指标，不补零、不伪造时间、梯度、显存或其他缺失的历史数据。横轴选 `train/global_step`，不要用导入时的 wall time。
+
+**正式训练**：同一终端执行下列命令，保留 smoke 通过的训练设置，从 AgiBot 基座开始，不续训/覆盖 `checkpoint-10`。`--output` 指定一个新的空目录或尚不存在的路径；目录名也是网页上的 run 名。
+
+```bash
+python ws/src/train_flip_pillow_lora.py train --report-to wandb \
+  --steps 1000 --save-steps 200 --output checkpoints/flip_pillow_lora_wandb_01
+```
+
+打开终端中 W&B 输出的 **run** 链接。横轴用 `train/global_step`，看 `train/loss`（总损失，正式训练每 10 步一条）、`train/action_loss_avg`（动作）、`train/dynamics_loss_avg`（视频预测），并可同时看 `train/learning_rate`、`train/grad_norm`。6 个训练进程共用一个 Trainer 跟踪的 run；不会上传模型权重或示范视频。线上会记录指标、训练配置和运行环境等信息，请使用获准的团队/项目。本地 `loss_log.jsonl` 和 checkpoint 照常保留。
+
+**服务器不能联网**：训练前 `export WANDB_MODE=offline`，训练命令仍保留 `--report-to wandb`。这时不提供实时云面板。待网络恢复，登录并对 W&B 输出的**具体离线 run 目录**执行 `wandb sync <离线run目录>`（本例在 `checkpoints/flip_pillow_lora_wandb_01/wandb/offline-run-*` 下）。旧 smoke 的普通 JSONL 不能直接 `wandb sync`，用上面的历史导入命令。
+
+### 5. 不用 W&B 时：在本机浏览器看本地日志
+
+网页只读训练器原有的 `loss_log.jsonl`，不写入 checkpoint 目录、不占用 GPU，不需要安装 TensorBoard 或登录 W&B。可以先开网页再训练，也可以在训练中途或结束后打开。网页服务仅监听服务器的 `127.0.0.1`，不需要开放防火墙端口。
+
+**本机终端**（在本机 DreamZero 仓库根目录，不是在服务器上）：将下面的 `DZ_SSH` 换成你平时 `ssh` 使用的地址或别名。若脚本已同步，可跳过 `scp`。`ssh` 这条命令同时启动网页和本地端口转发，请保持该终端打开。
+
+```bash
+DZ_SSH='omnisky@你的服务器IP'
+scp ws/src/serve_loss.py "$DZ_SSH":/data1/wp_ws/dreamzero-git/ws/src/
+ssh -t -o ExitOnForwardFailure=yes -L 127.0.0.1:8765:127.0.0.1:8765 "$DZ_SSH" \
+  'cd /data1/wp_ws/dreamzero-git && /data1/wp_ws/envs/dreamzero/bin/python ws/src/serve_loss.py'
+```
+
+在**本机浏览器**打开 `http://127.0.0.1:8765/`。默认显示 **Smoke 测试**，点击 **正式训练** 切换到正式训练目录。若使用 VS Code Remote-SSH，也可在服务器新终端运行 `python3 ws/src/serve_loss.py`，再在 VS Code 的“端口”面板转发 `8765`（与上面的 SSH 命令二选一）。网页每 3 秒刷新；初次加载模型期间显示“等待首条日志”正常。
+
+**原来通过预检的服务器训练终端**中运行 `python ws/src/train_flip_pillow_lora.py smoke`。查看 `loss`（总损失）、`action_loss_avg`（动作损失）、`dynamics_loss_avg`（视频预测损失）和 `learning_rate`。总损失在 smoke 中每步记录；分项均值分开写，默认约每 10 步记录，10 步时只有一个点也正常。网页不会把缺失指标补成 0；遇到 NaN/Inf 会提示。结束时检查 `checkpoints/flip_pillow_lora_smoke/checkpoint-10/` 是否写出。退出网页终端不影响独立启动的训练。
+
+若训练命令使用了 `--output`，启动网页时用 `--smoke-dir 你的输出目录` 或 `--train-dir 你的输出目录` 与之对应。若仅**本机**端口 8765 已占用，可将 SSH 的 `-L` 改为 `127.0.0.1:8766:127.0.0.1:8765` 并在浏览器访问本机 8766；若**服务器**端口已占用，则用 `--port` 和 `-L` 相应地一起调整。

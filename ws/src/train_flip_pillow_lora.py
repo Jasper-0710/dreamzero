@@ -77,6 +77,27 @@ def check_weights(base, wan, tokenizer):
     print(f'AgiBot: {base}\nWan: {wan}\nTokenizer: {tokenizer}', flush=True)
 
 
+def reporting_options(backend):
+    project = os.environ.get('WANDB_PROJECT', '').strip() or 'dreamzero'
+    if backend == 'wandb':
+        mode = os.environ.get('WANDB_MODE', 'online').lower()
+        if mode == 'disabled' or os.environ.get('WANDB_DISABLED', '').upper() in {'1', 'TRUE', 'YES', 'ON'}:
+            raise ValueError('已选 W&B，但环境禁用了上报。请 unset WANDB_DISABLED，并设置 WANDB_MODE=online 或 offline')
+        try:
+            import wandb  # noqa: F401 -- verify the SDK before starting workers; do not create a run here.
+        except ImportError as exc:
+            raise ValueError(f'当前 Python 无法导入 wandb：{exc}。若未安装，请在服务器的 dreamzero 环境运行 python -m pip install wandb') from exc
+        os.environ['WANDB_PROJECT'] = project  # Keep the SDK and the saved Hydra config in agreement.
+        os.environ['WANDB_LOG_MODEL'] = 'false'  # Keep model artifacts/checkpoints on the server.
+        os.environ['WANDB_WATCH'] = 'false'      # Scalar grad_norm is still logged by Trainer.
+        os.environ['WANDB_DISABLE_GIT'] = 'true'  # No repository patch or automatic source snapshot.
+        os.environ['WANDB_DISABLE_CODE'] = 'true'
+        print(f'W&B 项目：{project}；WANDB_MODE={mode}；不上传模型。', flush=True)
+        if mode in ('offline', 'dryrun'):
+            print('当前为离线记录，不会生成实时网页曲线。', flush=True)
+    return [f'report_to={backend}', f'wandb_project={json.dumps(project, ensure_ascii=False)}']
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('mode', choices=['check', 'smoke', 'train'], help='check 只做预检，不训练或下载')
@@ -86,11 +107,14 @@ def main():
     p.add_argument('--steps', type=int, help='默认 smoke=10，train=1000')
     p.add_argument('--save-steps', type=int, help='默认 smoke=最后一步，train=每 200 步（不超过总步数）')
     p.add_argument('--batch-size', type=int, default=1, help='每张卡的 batch，默认 1')
+    p.add_argument('--report-to', choices=['none', 'wandb'], default='none',
+                   help='默认 none 只写本地日志；wandb 使用 Trainer 原生上报，项目由 WANDB_PROJECT 指定')
     args = p.parse_args()
     steps = args.steps if args.steps is not None else (1000 if args.mode == 'train' else 10)
     save = args.save_steps if args.save_steps is not None else (min(200, steps) if args.mode == 'train' else steps)
     if not (1 <= save <= steps and args.batch_size >= 1):
         p.error('需要 1 <= save-steps <= steps，且 batch-size >= 1')
+    reporting = reporting_options(args.report_to)
 
     data = args.data.expanduser().resolve()
     base, wan, tokenizer = [Path(os.environ.get(var, ROOT / 'checkpoints' / name)).expanduser().resolve() for var, name in
@@ -125,9 +149,9 @@ def main():
         training_args.deepspeed=groot/vla/configs/deepspeed/zero2.json training_args.warmup_ratio=0.05
         weight_decay=1e-5 save_total_limit=5 upload_checkpoints=false bf16=true tf32=true eval_bf16=true
         dataloader_pin_memory=false dataloader_num_workers=1 save_lora_only=true save_strategy=steps
-        report_to=none wandb_project=dreamzero +train_dataset.dataset_kwargs.num_steps_per_shard=2000
+        +train_dataset.dataset_kwargs.num_steps_per_shard=2000
         ++action_head_cfg.config.skip_component_loading=true ++action_head_cfg.config.defer_lora_injection=true'''.split()
-    options += [f'max_steps={steps}', f'save_steps={save}', f'per_device_train_batch_size={args.batch_size}',
+    options += reporting + [f'max_steps={steps}', f'save_steps={save}', f'per_device_train_batch_size={args.batch_size}',
                 f'logging_steps={1 if args.mode == "smoke" else min(10, steps)}']
     paths = dict(yam_data_root=data, output_dir=output, pretrained_model_path=base, dit_version=wan,
                  tokenizer_path=tokenizer, text_encoder_pretrained_path=wan / WAN_FILES[0],
