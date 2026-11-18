@@ -1,0 +1,6 @@
+# CPU-only converter and alignment checker (Python 3.11). ffmpeg/ffprobe are system binaries.
+numpy>=1.24,<2
+pandas>=2,<3
+pyarrow>=14
+Pillow>=9.2
+tqdm>=4.64
