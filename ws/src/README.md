@@ -15,13 +15,13 @@ ffmpeg -hide_banner -encoders | grep libx264
 ffprobe -version | head -1
 ```
 
-当前 `data/flip_the_pillow/meta/info.json` 记载 **101 条 episode、51,934 个控制步、50 Hz**，三个相机均为 **640×480**。原始 `tasks.jsonl` 写的是 **`pick_cup`**。如果这批示范都是翻枕头，请显式传 `--task-text`；该操作只改**输出**任务表，不会更改原始录制。如果原始标签正确，可改用 `--keep-task-text`。多任务数据不允许用一个 `--task-text` 覆盖。
+当前 `data/flip_the_pillow/meta/info.json` 记载 **101 条 episode、51,934 个控制步、50 Hz**，三个相机均为 **640×480**。原始 `tasks.jsonl` 写的是 **`pick_cup`**。这批示范已确认都是翻到红胶带面朝上，请显式传 `--task-text`；该操作只改**输出**任务表，不会更改原始录制。如果原始标签正确，可改用 `--keep-task-text`。多任务数据不允许用一个 `--task-text` 覆盖。
 
 ```bash
 # 1. 小样本：源 episode 0、1；不会启动训练
 python ws/src/convert_aloha_to_dreamzero.py \
   --input data/flip_the_pillow --output data/flip_the_pillow_dz_smoke \
-  --limit 2 --task-text 'Flip the pillow over.'
+  --limit 2 --task-text 'Flip the pillow over so the side with the red tape faces up.'
 
 # 2. 从原始数据独立核对一个输出 episode；也可改 --episode 1
 python ws/src/check_aloha_alignment.py \
@@ -31,12 +31,12 @@ python ws/src/check_aloha_alignment.py \
 # 3. 确认任务和视角无误后，转全量到另一个新目录
 python ws/src/convert_aloha_to_dreamzero.py \
   --input data/flip_the_pillow --output data/flip_the_pillow_dz \
-  --task-text 'Flip the pillow over.'
+  --task-text 'Flip the pillow over so the side with the red tape faces up.'
 ```
 
 按当前源元数据，前两条合计 **1,477 行、6 个 MP4**。核对脚本对选定 episode 的**全部** state、action 及未重排的诊断列做等值比较，对三路 MP4 检查全部解码帧的时间戳；再抽取首、中、尾等位置，把解码 RGB 和**同相机、同源行**的 JPEG 比较，打印每路最差一张的平均绝对像素误差。H.264 是有损的，不要求像素相等；该抽查不等于验证硬件曝光时刻。还可以单独执行 `python ws/src/test_aloha_temporal.py`，测试固定 anchor、最后一个完整窗口，以及暂停/长间隔边界。
 
-转换不覆盖已有目录。在目标目录的同一文件系统内临时写入，校验成功后才发布；正常报错/中断不会留下看似完整的训练集。按原录制 episode 选取子集可以用 `--start-episode N --limit M`（前者含 N）。如果要隔离训练/验证，请在**源 episode 层面**先分开转换，不要将同一次示范的相邻帧随机拆开。
+转换不覆盖已有目录。在目标目录的同一文件系统内临时写入，校验成功后才发布；正常报错/中断不会留下看似完整的训练集。按原录制 episode 选取子集可以用 `--start-episode N --limit M`（前者含 N）。训练和评估必须按**整条源录制**隔离；已完成全量转换时可用下文的 `prepare_pillow_holdout.py`，不要将同一次示范的相邻帧随机拆开。
 
 ## 对齐规则（按录制和回放代码，而不是猜偏移）
 
@@ -80,5 +80,69 @@ data/flip_the_pillow_dz/
 - 本工具直接复用本仓库 `scripts/data/convert_lerobot_to_gear.py` 的模态构建、绝对统计和基础校验函数。其原 CLI **不会**把内嵌 JPEG 变成视频，所以不要直接对原目录运行它，也不必转换后再运行一次。相对统计以实际读取器 `groot/vla/data/dataset/lerobot.py::_calculate_relative_stats_for_key` 为准。
 - 输出针对 DreamZero 的 GEAR 读取器，不直接复制原 `episodes_stats.jsonl` 里的 JPEG 像素统计。训练读的是重新计算的 `stats.json` 和 `relative_stats_dreamzero.json`。
 - `info.json` 的真实机器人仍是 `mobile_aloha`；`embodiment.json` 的 `yam` 仅用于复用此仓库已有的双臂三视角接口，**不是说 ALOHA 和 YAM 硬件相同**。
-- 后续微调时把 `YAM_DATA_ROOT` 指向**全量输出目录**。`scripts/train/yam_training.sh` 使用 `data=dreamzero/yam_relative`，但本仓库的 `fps.yam` 默认是 **30**。保留本批 50 Hz 数据时，在你自己的启动脚本的 `torchrun ...` 参数中加入 **`fps.yam=50`**（24 个控制周期为 0.48 秒）。这个 shell 脚本**不会**转发额外命令行参数；在 `bash scripts/train/yam_training.sh` 后面追加该参数并不生效。
-- 不要直接用 `scripts/open_loop_yam.py` 检查动作：它硬编码了另一套关节偏移（32–46）且直接从 `annotation.task` 列读文本。这里是紧凑的 14 维切片和 `task_index`，请用上面的核对脚本，或让评估代码按本数据集的 `meta/modality.json` 取值。
+- 后续微调时把 `YAM_DATA_ROOT` 指向**用于训练的转换后目录**（如果划分留出集，就指向训练子集）。`scripts/train/yam_training.sh` 使用 `data=dreamzero/yam_relative`，但本仓库的 `fps.yam` 默认是 **30**。保留本批 50 Hz 数据时，在你自己的启动脚本的 `torchrun ...` 参数中加入 **`fps.yam=50`**（24 个控制周期为 0.48 秒）。这个 shell 脚本**不会**转发额外命令行参数；在 `bash scripts/train/yam_training.sh` 后面追加该参数并不生效。
+- 不要直接用 `scripts/open_loop_yam.py` 检查动作：它硬编码了另一套关节偏移（32–46）且直接从 `annotation.task` 列读文本。这里是紧凑的 14 维切片和 `task_index`，请用上面的核对脚本验证转换。评估模型时，另用按本数据集 `meta/modality.json` 取值的代码。
+
+## 转换完成后：在服务器微调翻枕头策略
+
+下面只在服务器 `/data1/wp_ws/dreamzero-git` 执行。先将 `ws/src` 的更新同步到服务器。已经得到 `data/flip_the_pillow_dz` 就直接使用，不需要再编码视频，也不需要修改绝对动作标签。
+
+### 1. 核对全量输出，再留出未见过的示范
+
+```bash
+cd /data1/wp_ws/dreamzero-git
+# 新终端若已部署服务器激活脚本，可先 source /data1/wp_ws/activate_dreamzero.sh
+cat data/flip_the_pillow_dz/meta/tasks.jsonl
+for ep in 0 50 100; do
+  python ws/src/check_aloha_alignment.py --input data/flip_the_pillow \
+    --output data/flip_the_pillow_dz --episode "$ep" --samples 5 || break
+done
+
+# 已有独立测试录制时，这一步可选。否则保留最后 10 条原始录制用于评估。
+python ws/src/prepare_pillow_holdout.py --holdout 10
+export YAM_DATA_ROOT="$PWD/data/flip_the_pillow_dz_train"
+```
+
+核对成功应显示指令是红胶带朝上、所查轨迹的 state/action 全行一致、三路视频的 PTS 和抽样像素比较通过。留出脚本只读全量数据：新目录对已有 Parquet 和 MP4 建符号链接，不复制或转码视频；在新 `meta` 里只用训练轨迹重算绝对及相对统计。**不要移动或删除全量目录**。此次 101 条原始录制对应训练 0–90、留出 91–100；预计 46,921 个训练帧、273 个训练 MP4；实际 ID 见训练目录的 `meta/holdout.json`。留出的是整条录制（包括暂停切段），不是随机视频帧。若另有独立评估数据、不留出这 10 条，则把 `YAM_DATA_ROOT` 指向全量转换后的目录。
+
+### 2. 检查分配到的 GPU 和已有权重
+
+```bash
+nvidia-smi
+free -h
+df -h .
+# 新终端请使用服务器激活脚本的设置；仅在确实获分配物理 1–6 时使用：
+# export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1,2,3,4,5,6 NUM_GPUS=6
+# 默认根为 ./checkpoints。如果服务器已有权重，直接导出已有目录：
+# export DZ_CKPT_DIR=/实际路径/DreamZero-AgiBot
+# export WAN_CKPT_DIR=/实际路径/Wan2.1-I2V-14B-480P
+# export TOKENIZER_DIR=/实际路径/umt5-xxl
+python ws/src/train_flip_pillow_lora.py check
+```
+
+预检只查表、文件（含 AgiBot 索引的分片和 Git LFS 指针）、解释器及 PyTorch 可见卡数，不启动训练，也不证明显存一定足够。缺权重时才执行对应的下载命令。下面是这份**训练入口**所需的下载项；其 DiT 使用 AgiBot 检查点初始化，再注入 LoRA，因此不需要另下一套 Wan DiT 分片。若日后使用其他推理入口，按其加载方式准备相应基座组件。
+
+```bash
+# 若你的环境仅有 huggingface-cli，将下面的 hf download 替换为 huggingface-cli download。
+hf download GEAR-Dreams/DreamZero-AgiBot --local-dir "${DZ_CKPT_DIR:-./checkpoints/DreamZero-AgiBot}"
+hf download Wan-AI/Wan2.1-I2V-14B-480P \
+  models_t5_umt5-xxl-enc-bf16.pth models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth Wan2.1_VAE.pth \
+  --local-dir "${WAN_CKPT_DIR:-./checkpoints/Wan2.1-I2V-14B-480P}"
+hf download google/umt5-xxl --include '*.json' 'spiece.model' --local-dir "${TOKENIZER_DIR:-./checkpoints/umt5-xxl}"
+```
+
+### 3. 先验证 10 步，再做第一轮训练
+
+```bash
+# 在上面同一终端运行，沿用 YAM_DATA_ROOT 和明确的 CUDA_VISIBLE_DEVICES
+python ws/src/train_flip_pillow_lora.py smoke
+tail -n 12 checkpoints/flip_pillow_lora_smoke/loss_log.jsonl
+ls -lh checkpoints/flip_pillow_lora_smoke/checkpoint-10/
+
+# smoke 正常后：从 AgiBot 重新开始训练，不续用 smoke 的 checkpoint
+python ws/src/train_flip_pillow_lora.py train --steps 1000 --save-steps 200
+```
+
+两种模式分别写 `checkpoints/flip_pillow_lora_smoke` 和 `checkpoints/flip_pillow_lora_train`，遇非空输出目录会停止；新实验可加 `--output checkpoints/flip_pillow_lora_run02`。默认每卡 batch 1、学习率 `1e-5`、禁用 W&B 上报；显存和吞吐确认后才考虑 `--batch-size`。启动器保留 YAM 的 `3 views / 24 actions per block / num_frames=33`、LoRA 和 ZeRO-2，并显式 `fps.yam=50`；将每个数据分片的目标大小设为 2,000 步，以降低多卡三路原始 RGB 解码及预取的**主机内存**占用。这与 GPU 显存是不同的限制。
+
+**验收分两层：** 10 步结束、loss 和动作损失有限、写出 `checkpoint-10`，只说明训练管线通了。1,000 步也只是方便比较的第一轮预算，不是最优值。训练入口不会自动构造验证集。后续需在 `holdout.json` 指定的**未参与训练的录制**上，用训练集的统计和 `modality.json` 解码动作，在同一动作空间比较左右臂关节误差和夹爪开合时机；不要直接运行旧 `open_loop_yam.py`。最终另做多种未见枕头起始位置的受控真机测试（限速、有人看护、可急停），记录“翻后红胶带面朝上、松手后枕头在桌面稳定”的成功次数 / 总次数。

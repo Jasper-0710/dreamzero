@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Check or launch DreamZero's YAM LoRA recipe for the converted 50 Hz Mobile ALOHA dataset."""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+TASK = 'Flip the pillow over so the side with the red tape faces up.'
+VIEWS = [f'observation.images.{v}_camera-images-rgb' for v in ('top', 'left', 'right')]
+WAN_FILES = ('models_t5_umt5-xxl-enc-bf16.pth', 'models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth', 'Wan2.1_VAE.pth')
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def jsonl(path):
+    return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+
+
+def require_file(path):
+    if not path.is_file() or not path.stat().st_size:
+        raise ValueError(f'文件缺失或为空：{path}')
+
+
+def check_data(root):
+    meta = root / 'meta'
+    info = read_json(meta / 'info.json')
+    features = info['features']
+    if (info['fps'] != 50 or any(features[k]['shape'] != [14] for k in ('observation.state', 'action'))
+            or set(k for k, v in features.items() if v['dtype'] == 'video') != set(VIEWS)
+            or read_json(meta / 'embodiment.json')['embodiment_tag'] != 'yam'):
+        raise ValueError(f'{root} 不是本任务的 50 Hz、双臂 14 维、三视角 YAM 接口数据')
+    tasks = jsonl(meta / 'tasks.jsonl')
+    if len(tasks) != 1 or tasks[0]['task'] != TASK:
+        raise ValueError(f'期望任务 {TASK!r}，实际 {tasks!r}；请检查所选数据目录')
+    for name in ('modality.json', 'stats.json', 'relative_stats_dreamzero.json'):
+        require_file(meta / name)
+    episodes = jsonl(meta / 'episodes.jsonl')
+    if (not episodes or len(episodes) != info['total_episodes']
+            or sum(e['length'] for e in episodes) != info['total_frames']
+            or len(VIEWS) * len(episodes) != info['total_videos']):
+        raise ValueError('info.json 的轨迹数、总帧数或视频数与 episodes.jsonl 不符')
+    for ordinal, ep in enumerate(episodes):
+        idx = ep['episode_index']
+        if idx != ordinal or ep['tasks'] != [TASK]:
+            raise ValueError(f'episodes.jsonl 第 {ordinal + 1} 行的 ID 或任务不符')
+        fields = dict(episode_index=idx, episode_chunk=idx // info['chunks_size'])
+        require_file(root / info['data_path'].format(**fields))
+        for view in VIEWS:
+            require_file(root / info['video_path'].format(video_key=view, **fields))
+    print(f"数据：{root}\n{len(episodes)} episodes，{info['total_frames']:,} 帧，{info['total_videos']} 个 MP4，50 Hz\n任务：{TASK}", flush=True)
+
+
+def check_weights(base, wan, tokenizer):
+    index = base / 'model.safetensors.index.json'
+    files = ([base / name for name in sorted(set(read_json(index)['weight_map'].values()))]
+             if index.is_file() else [base / 'model.safetensors'])
+    if not files:
+        raise ValueError(f'空的权重分片索引：{index}')
+    files += [wan / name for name in WAN_FILES] + [tokenizer / 'tokenizer_config.json']
+    files.append(tokenizer / ('tokenizer.json' if (tokenizer / 'tokenizer.json').is_file() else 'spiece.model'))
+    missing = []
+    for path in files:
+        if not path.is_file() or not path.stat().st_size:
+            missing.append(str(path))
+        else:
+            with path.open('rb') as src:
+                if src.read(43).startswith(b'version https://git-lfs.github.com/spec/'):
+                    missing.append(f'{path}（仅 Git LFS 指针）')
+    if missing:
+        raise ValueError('未找到完整本地权重/tokenizer（AgiBot 支持 model.safetensors 或索引及全部分片）；'
+                         '按 ws/src/README.md 准备或指定路径：\n  ' + '\n  '.join(missing))
+    print(f'AgiBot: {base}\nWan: {wan}\nTokenizer: {tokenizer}', flush=True)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('mode', choices=['check', 'smoke', 'train'], help='check 只做预检，不训练或下载')
+    p.add_argument('--data', type=Path, default=os.environ.get('YAM_DATA_ROOT', ROOT / 'data/flip_the_pillow_dz_train'),
+                   help='默认使用 YAM_DATA_ROOT 或留出之后的训练目录，而不是全量数据')
+    p.add_argument('--output', type=Path, help='新运行的输出目录；默认 checkpoints/flip_pillow_lora_<模式>')
+    p.add_argument('--steps', type=int, help='默认 smoke=10，train=1000')
+    p.add_argument('--save-steps', type=int, help='默认 smoke=最后一步，train=每 200 步（不超过总步数）')
+    p.add_argument('--batch-size', type=int, default=1, help='每张卡的 batch，默认 1')
+    args = p.parse_args()
+    steps = args.steps if args.steps is not None else (1000 if args.mode == 'train' else 10)
+    save = args.save_steps if args.save_steps is not None else (min(200, steps) if args.mode == 'train' else steps)
+    if not (1 <= save <= steps and args.batch_size >= 1):
+        p.error('需要 1 <= save-steps <= steps，且 batch-size >= 1')
+
+    data = args.data.expanduser().resolve()
+    base, wan, tokenizer = [Path(os.environ.get(var, ROOT / 'checkpoints' / name)).expanduser().resolve() for var, name in
+                            [('DZ_CKPT_DIR', 'DreamZero-AgiBot'), ('WAN_CKPT_DIR', 'Wan2.1-I2V-14B-480P'), ('TOKENIZER_DIR', 'umt5-xxl')]]
+    output = (args.output or ROOT / 'checkpoints' / f'flip_pillow_lora_{args.mode}').expanduser().resolve()
+    if not data.is_dir():
+        p.error(f'找不到训练集：{data}。先运行 prepare_pillow_holdout.py；若另有独立测试数据，可显式用 --data 指向全量目录')
+    check_data(data)
+    check_weights(base, wan, tokenizer)
+    mask = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+    if not mask:
+        p.error('请先激活服务器环境并显式设置 CUDA_VISIBLE_DEVICES 为分配给你的卡；不会自动占用所有 GPU')
+    import torch
+    visible = torch.cuda.device_count()
+    procs = int(os.environ.get('NUM_GPUS', visible))
+    if not 1 <= procs <= visible:
+        p.error(f'NUM_GPUS={procs}，但 PyTorch 在 CUDA_VISIBLE_DEVICES={mask} 中只看到 {visible} 张卡')
+    print(f'Python: {sys.executable}\nPyTorch: {torch.__version__}，CUDA_VISIBLE_DEVICES={mask}，训练进程数={procs}', flush=True)
+    if args.mode == 'check':
+        print('预检通过。尚未加载模型或启动训练。')
+        return
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        p.error(f'输出目录非空：{output}；请用 --output 选一个新目录，避免误续训或跳过训练')
+
+    # Mirror the architecture/LoRA flags from scripts/train/yam_training.sh. The stock
+    # shell launcher does not forward CLI overrides. Do NOT change the 24-step action block.
+    options = '''data=dreamzero/yam_relative fps.yam=50 train_architecture=lora
+        model=dreamzero/vla model/dreamzero/action_head=wan_flow_matching_action_tf
+        model/dreamzero/transform=dreamzero_cotrain num_frames=33 action_horizon=24 num_views=3
+        num_frame_per_block=2 num_action_per_block=24 num_state_per_block=1 max_chunk_size=4 frame_seqlen=880
+        image_resolution_width=320 image_resolution_height=176 seed=42 training_args.learning_rate=1e-5
+        training_args.deepspeed=groot/vla/configs/deepspeed/zero2.json training_args.warmup_ratio=0.05
+        weight_decay=1e-5 save_total_limit=5 upload_checkpoints=false bf16=true tf32=true eval_bf16=true
+        dataloader_pin_memory=false dataloader_num_workers=1 save_lora_only=true save_strategy=steps
+        report_to=none wandb_project=dreamzero +train_dataset.dataset_kwargs.num_steps_per_shard=2000
+        ++action_head_cfg.config.skip_component_loading=true ++action_head_cfg.config.defer_lora_injection=true'''.split()
+    options += [f'max_steps={steps}', f'save_steps={save}', f'per_device_train_batch_size={args.batch_size}',
+                f'logging_steps={1 if args.mode == "smoke" else min(10, steps)}']
+    paths = dict(yam_data_root=data, output_dir=output, pretrained_model_path=base, dit_version=wan,
+                 tokenizer_path=tokenizer, text_encoder_pretrained_path=wan / WAN_FILES[0],
+                 image_encoder_pretrained_path=wan / WAN_FILES[1], vae_pretrained_path=wan / WAN_FILES[2])
+    options += [f'{k}={json.dumps(str(v), ensure_ascii=False)}' for k, v in paths.items()]
+    os.chdir(ROOT)
+    os.environ['PYTHONPATH'] = os.pathsep.join(filter(None, [str(ROOT), os.environ.get('PYTHONPATH')]))
+    os.environ['HYDRA_FULL_ERROR'] = '1'
+    print(f'启动 {args.mode}：{steps} 步，每卡 batch={args.batch_size}，每 {save} 步保存 → {output}', flush=True)
+    os.execv(sys.executable, [sys.executable, '-m', 'torch.distributed.run', '--standalone', f'--nproc-per-node={procs}',
+                              'groot/vla/experiment/experiment.py', *options])
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, ImportError) as exc:
+        sys.exit(f'预检失败：{exc}')
