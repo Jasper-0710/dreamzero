@@ -104,13 +104,14 @@ def build_data(root):
                 events=[r for r in events if r['checkpoint'] in steps], episodes=episodes)
 
 
-def write_report(root, output=None):
+def write_report(root, output=None, *, video_section=""):
     data = build_data(root)
     dest = output if output is not None else root / 'report.html'
     if dest.suffix.lower() != '.html' or dest.resolve() == TEMPLATE.resolve() or dest.is_symlink():
         raise ValueError('请使用独立的 .html 输出路径，不要覆盖模板或软链接')
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':')).replace('<', r'\u003c')
     html = TEMPLATE.read_text(encoding='utf-8').replace('__REPORT_DATA__', payload)
+    html = html.replace('<!-- ALIGNED_VIDEO -->', video_section)
     with tempfile.NamedTemporaryFile(dir=dest.parent, suffix='.html.tmp', delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:

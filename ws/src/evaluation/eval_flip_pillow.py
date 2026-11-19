@@ -102,16 +102,20 @@ def report(label, segments, events, layout):
     return {'comparison': [summary], 'per_source': per_source, 'gripper_summary': timing, 'events': events}
 
 
-def evaluate_step(step, data, jobs, predict, output, tolerance, baseline=False):
-    """predict receives current observations only. Truth is used exclusively for scoring."""
-    folder = output / f'checkpoint-{step}'
-    folder.mkdir()
+def save_trace(folder, data, ep, n, predict):
+    state, gt = read_rows(ep)
+    state, gt = state[:n], gt[:n]
+    pred = make_predictions(data, ep, n, state, predict)
+    np.savez_compressed(folder / f'episode_{ep.id:06}.npz', gt=gt, pred=pred, state=state,
+                        source_id=ep.source, source_frames=ep.source_start+np.arange(n),
+                        action_names=data.names, anchors=np.arange(0, n, H))
+    return ep, state, gt, pred
+
+
+def score_traces(step, data, traces, tolerance, baseline):
     segments, events, holds, hold_events = [], [], [], []
-    for j, (ep, n) in enumerate(jobs, 1):
-        print(f'[{step}] {j}/{len(jobs)} source={ep.source}, episode={ep.id}: {n} frames, {(n+H-1)//H} blocks', flush=True)
-        state, gt = read_rows(ep)
-        state, gt = state[:n], gt[:n]
-        pred = make_predictions(data, ep, n, state, predict)
+    for ep, state, gt, pred in traces:
+        n = len(gt)
         segments.append((ep, gt, pred))
         events.extend(events_for(step, data, ep, gt, pred, tolerance))  # never match across segments
         if baseline:
@@ -120,12 +124,20 @@ def evaluate_step(step, data, jobs, predict, output, tolerance, baseline=False):
                 hold[:, s] = state[(np.arange(n)//H)*H, data.state[k]]
             holds.append((ep, gt, hold))
             hold_events.extend(events_for('hold_state', data, ep, gt, hold, tolerance))
-        np.savez_compressed(folder / f'episode_{ep.id:06}.npz', gt=gt, pred=pred, state=state,
-                            source_id=ep.source, source_frames=ep.source_start+np.arange(n),
-                            action_names=data.names, anchors=np.arange(0, n, H))
     reports = [report('hold_state', holds, hold_events, data.action)] if baseline else []
     reports.append(report(step, segments, events, data.action))
     return reports
+
+
+def evaluate_step(step, data, jobs, predict, output, tolerance, baseline=False):
+    """predict receives current observations only. Truth is used exclusively for scoring."""
+    folder = output / f'checkpoint-{step}'
+    folder.mkdir()
+    def traces():
+        for j, (ep, n) in enumerate(jobs, 1):
+            print(f'[{step}] {j}/{len(jobs)} source={ep.source}, episode={ep.id}: {n} frames, {(n+H-1)//H} blocks', flush=True)
+            yield save_trace(folder, data, ep, n, predict)
+    return score_traces(step, data, traces(), tolerance, baseline)
 
 
 def gpu_step(step, ckpt, verified, data, jobs, opts, baseline):

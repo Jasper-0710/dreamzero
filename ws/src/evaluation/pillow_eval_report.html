@@ -6,6 +6,7 @@
 </style></head>
 <body><main><header><div class="kicker">DREAMZERO / MOBILE ALOHA</div><h1>翻枕头 · 离线动作对照</h1><div id="coverage"></div><div id="notice"></div></header>
 <noscript>请在浏览器中启用 JavaScript 显示图表。不需要网络。</noscript>
+<!-- ALIGNED_VIDEO -->
 <section class="card"><h2>1. 哪个节点的动作更像录制？</h2><p class="muted">各条源录制等权，误差越小越好。hold_state 是“每个窗口保持起点实测姿态不动”的基线，不是模型。左右臂 MAE 的条形使用同一比例。</p>
 <div class="scroll"><table><thead><tr><th>节点</th><th>左臂 MAE (rad)</th><th>右臂 MAE (rad)</th><th>左臂 RMSE (rad)</th><th>右臂 RMSE (rad)</th><th>左夹爪 MAE</th><th>右夹爪 MAE</th></tr></thead><tbody id="errors"></tbody></table></div></section>
 <section class="card"><h2>2. 逐帧对照：录制指令 vs. 模型预测</h2><p class="muted">每条线是同一动作维度。横轴是原录制帧号；竖虚线是新预测窗口的起点，窗口间不连接预测线。切换到夹爪可看到开关阈值。</p>

@@ -81,7 +81,7 @@ class VideoTest(unittest.TestCase):
         for source, anchors in [(90, [0]), (91, [5]), (91, [43]), (91, [1,0]), (91, [0,0])]:
             with self.subTest(source=source, anchors=anchors), self.assertRaises(ValueError):
                 video.select_windows(self.data.episodes, source, anchors)
-        self.assertEqual(video.parse_args([]).anchors, (168, 192, 216, 240, 264))
+        self.assertEqual(video.parse_args([]).anchors, (168, 192, 216, 240, 264, 288))
         self.assertEqual(video.OFFSETS, (0, 3, 6, 9, 12, 15, 18, 21, 24))
 
     def test_decode_layout_scale_and_first_frame(self):

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import ExitStack, nullcontext
 from fractions import Fraction
 from pathlib import Path
 
@@ -14,9 +15,10 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from ws.src.common.pillow import TASK, VIEWS
-from ws.src.evaluation.pillow_eval_policy import clear_window_cache, independent_policy, recipe, single_gpu_mask
+from ws.src.evaluation.pillow_eval_policy import clear_window_cache, independent_policy, recipe
 from ws.src.evaluation.pillow_open_loop import FPS, H, Holdout, observation, read_rows, selected_images
 from ws.src.evaluation.pillow_video_report import check_encoder, encode_mp4, page, side_by_side
+from ws.src.evaluation.pillow_video_workers import assignments, run_workers, video_devices
 
 # ShardedLeRobotSubLangSingleActionChunkDatasetDROID._uniform_sample_from_language_ranges:
 # the eight offsets 0,3,...,21, then last_idx+3 at the end of the sequence.
@@ -24,7 +26,7 @@ from ws.src.evaluation.pillow_video_report import check_encoder, encode_mp4, pag
 STRIDE = 3
 OFFSETS = tuple(range(0, H + 1, STRIDE))
 RATE = Fraction(FPS, STRIDE)
-SOURCE91 = (168, 192, 216, 240, 264)  # inspected in the ORIGINAL 50 Hz recording, not encoder timestamps
+SOURCE91 = (168, 192, 216, 240, 264, 288)  # original 50 Hz frames; includes the post-flip window
 CAMERAS = ['video.' + v.removeprefix('observation.images.') for v in VIEWS]
 
 
@@ -106,7 +108,7 @@ def recorded_grid(policy, obs):
     return x[0, 0]
 
 
-def comparison_frames(jobs, layout, forecast, reference, step):
+def paired_frames(jobs, layout, forecast, reference, step):
     for ep, anchors in jobs:
         state, _ = read_rows(ep)
         for a, views in windows_rgb(ep, anchors):
@@ -121,7 +123,12 @@ def comparison_frames(jobs, layout, forecast, reference, step):
                 # Only NOW prepare the reference using the saved eval transform. State stays fixed;
                 # it is included only for the transform interface, not passed to a forecasting model.
                 gt = reference(observation(views[i], state[a], layout))
-                yield side_by_side(gt, pred[i], step, ep.source, src, offset)
+                yield gt, pred[i], ep.source, src, offset
+
+
+def comparison_frames(jobs, layout, forecast, reference, step):
+    for gt, pred, source, anchor, offset in paired_frames(jobs, layout, forecast, reference, step):
+        yield side_by_side(gt, pred, step, source, anchor, offset)
 
 
 def manifest(jobs, ckpt, seed, tiled):
@@ -139,12 +146,52 @@ def manifest(jobs, ckpt, seed, tiled):
                 num_dit_steps=os.environ.get('NUM_DIT_STEPS', '8'), windows=windows)
 
 
+def render_part(path, jobs, layout, ckpt, verified, o, *, load_slots=None, ready=None):
+    """One full replica. Single-card exports stream to MP4; parallel workers spool lossless frames."""
+    expected = sum(len(a) for _, a in jobs) * len(OFFSETS)
+    with ExitStack() as stack:
+        with (load_slots if load_slots is not None else nullcontext()):
+            print(f'[GPU {os.environ["CUDA_VISIBLE_DEVICES"]}] 正在加载 {ckpt.name}', flush=True)
+            policy, joint = stack.enter_context(independent_policy(ckpt, verified, o.seed))
+        if ready is not None:
+            print(f'[GPU {os.environ["CUDA_VISIBLE_DEVICES"]}] 权重就绪，等待其余 GPU。', flush=True)
+            ready.wait()  # outside the load semaphore, so every worker can reach the barrier
+        head = policy.trained_model.action_head
+
+        def forecast(obs):
+            _, latent = joint(obs)
+            clear_window_cache(head)
+            return decode_prediction(head, latent, o.tiled_decode)
+
+        frames = comparison_frames(jobs, layout, forecast, lambda obs: recorded_grid(policy, obs), o.step)
+        if ready is None:
+            n = encode_mp4(path, frames, RATE)
+        else:
+            n = 0
+            with path.open('xb') as f:
+                for n, rgb in enumerate(frames, 1):
+                    np.save(f, rgb, allow_pickle=False)
+        if n != expected:
+            raise ValueError(f'{path}: 应有 {expected} 帧，实际 {n}')
+        return bool(o.tiled_decode or head.tiled)
+
+
+def ordered_frames(parts):
+    for path, expected in parts:  # assignment order, not worker completion order
+        with path.open('rb') as f:
+            for _ in range(expected):
+                yield np.load(f, allow_pickle=False)
+            if f.read(1):
+                raise ValueError(f'发现多余的分片帧：{path}')
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--run', type=Path, default=Path('checkpoints/flip_pillow_lora_01'))
     p.add_argument('--step', type=int, default=2000, help='只加载这一个 checkpoint')
     p.add_argument('--source-id', type=int, default=91, help='留出的原始录制 ID，不是转换后的 episode_index')
-    p.add_argument('--anchors', type=int, nargs='+', help='原始录制帧号（0 起）。录制 91 默认 168 192 216 240 264')
+    p.add_argument('--anchors', type=int, nargs='+', help='原始录制帧号（0 起）。录制 91 默认 168 192 216 240 264 288')
+    p.add_argument('--parallel-loads', type=int, default=1, help='最多同时加载权重的 GPU 数（仅影响加载，不限制推理并行度）')
     p.add_argument('--train-data', type=Path, default=Path('data/flip_the_pillow_dz_train'))
     p.add_argument('--full-data', type=Path, help='若移动过全量转换集，请指定新路径')
     p.add_argument('--base', type=Path, help='可选：原始 DreamZero-AgiBot 权重目录')
@@ -153,6 +200,8 @@ def parse_args(argv=None):
     p.add_argument('--tiled-decode', action='store_true', help='仅 VAE 解码使用官方空间分块；解码显存紧张时用')
     p.add_argument('--check-only', action='store_true', help='读权重头、Parquet、视频及 PTS，检查编码器；不加载模型/写文件')
     o = p.parse_args(argv)
+    if o.parallel_loads < 1:
+        p.error('--parallel-loads 必须大于 0')
     if o.step <= 0 or o.source_id < 0 or not 0 <= o.seed < 2**32:
         p.error('step 必须为正数、source-id 非负、seed 为 uint32')
     if o.anchors is None:
@@ -165,6 +214,7 @@ def parse_args(argv=None):
 
 
 def main(o):
+    groups = assignments(o.anchors, video_devices(o.check_only))
     train, run = (p.expanduser().resolve(strict=True) for p in (o.train_data, o.run))
     data = Holdout(train, o.full_data and o.full_data.expanduser())
     jobs = select_windows(data.episodes, o.source_id, o.anchors)
@@ -173,6 +223,8 @@ def main(o):
     check_video_recipe(ckpt, verified)
     check_encoder()
     print(f'source {o.source_id}，起始帧 {list(o.anchors)}；偏移 {list(OFFSETS)} / {FPS} Hz。', flush=True)
+    for gpu, starts in groups:
+        print(f'GPU {gpu} ← 原始起始帧 {starts}', flush=True)
     if o.check_only:
         for ep, anchors in jobs:
             read_rows(ep)
@@ -180,7 +232,6 @@ def main(o):
                 pass
         print('视频预检通过：没有加载模型、运行推理或写入文件。')
         return
-    single_gpu_mask()
     out = o.output.expanduser()
     if out.is_symlink():
         raise ValueError(f'拒绝软链接输出：{out}')
@@ -194,29 +245,34 @@ def main(o):
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out.parent, prefix='.pillow-video-') as d:
         stage = Path(d)
-        with independent_policy(ckpt, verified, o.seed) as (policy, joint):
-            head = policy.trained_model.action_head
-
-            def forecast(obs):
-                _, latent = joint(obs)
-                clear_window_cache(head)  # disposable here: free KV/context before the extra VAE decode
-                return decode_prediction(head, latent, o.tiled_decode)
-
-            frames = comparison_frames(jobs, data.state, forecast, lambda obs: recorded_grid(policy, obs), o.step)
-            meta = manifest(jobs, ckpt, o.seed, o.tiled_decode or head.tiled)
-            n = encode_mp4(stage/'comparison.mp4', frames, RATE)
-        if n != len(meta['windows']) * len(OFFSETS):
-            raise ValueError(f'输出帧数错误：{n}')
+        n = len(o.anchors) * len(OFFSETS)
+        if len(groups) == 1:
+            tiled = render_part(stage/'comparison.mp4', jobs, data.state, ckpt, verified, o)
+        else:
+            tasks, parts = [], []
+            for i, (gpu, starts) in enumerate(groups):
+                shard = select_windows(data.episodes, o.source_id, starts)
+                part = stage/f'part-{i}.npyseq'
+                tasks.append((gpu, (part, shard, data.state, ckpt, verified, o)))
+                parts.append((part, len(starts) * len(OFFSETS)))
+            modes = run_workers(render_part, tasks, o.parallel_loads)
+            if len(set(modes)) != 1:
+                raise ValueError('各 GPU 的 VAE 解码模式不一致，拒绝合并')
+            tiled = modes[0]
+            if encode_mp4(stage/'comparison.mp4', ordered_frames(parts), RATE) != n:
+                raise ValueError(f'输出帧数应为 {n}')
+        meta = manifest(jobs, ckpt, o.seed, tiled)
+        meta['gpu_assignments'] = [{'device': d, 'anchors': a} for d, a in groups]
         (stage/'windows.json').write_text(json.dumps(meta, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
         (stage/'index.html').write_text(page(meta), encoding='utf-8')
         out.mkdir(exist_ok=False)  # exclusive, even if another job just finished at this path
         for name in ('comparison.mp4', 'windows.json', 'index.html'):
             (stage/name).replace(out/name)
-    print(f'完成：{out}/comparison.mp4（{n} 帧）；拷回整个目录后双击 index.html。')
+    print(f'完成：{out}/comparison.mp4（{n} 帧）；可在服务器此目录启动网页服务查看 index.html。')
 
 
 if __name__ == '__main__':
     try:
         main(parse_args())
-    except (OSError, ValueError, KeyError, ImportError) as exc:
+    except (OSError, ValueError, KeyError, ImportError, RuntimeError) as exc:
         sys.exit(f'视频导出失败：{exc}')
