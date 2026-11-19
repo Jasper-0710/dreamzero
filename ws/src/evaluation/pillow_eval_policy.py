@@ -1,6 +1,9 @@
 """Restore the same base -> PEFT injection -> tuned parameters as the training run."""
 import gc
 import os
+import random
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -143,3 +146,55 @@ def load_policy(ckpt, verified):
         raise ValueError('Unexpected policy factory or observation horizon')
     torch.cuda.synchronize()
     return policy
+
+
+def single_gpu_mask():
+    mask = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+    if not mask or ',' in mask or mask == '-1' or int(os.environ.get('WORLD_SIZE', '1')) != 1:
+        raise ValueError('请直接用 python 启动，并设置 CUDA_VISIBLE_DEVICES 为一张已分配的 GPU；不需要 torchrun。')
+    if 'LOAD_TRT_ENGINE' in os.environ:
+        raise ValueError('请先 unset LOAD_TRT_ENGINE，以免复用其他模型的 TensorRT 权重')
+    return mask
+
+
+def seed_all(seed, torch):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def clear_window_cache(head):
+    head.current_start_frame = 0
+    for name in ('language', 'clip_feas', 'ys', 'kv_cache1', 'kv_cache_neg', 'crossattn_cache', 'crossattn_cache_neg'):
+        setattr(head, name, None)
+
+
+@contextmanager
+def independent_policy(ckpt, verified, seed):
+    """One GPU, no server. Both consumers get exactly the same fresh joint prediction at each anchor."""
+    single_gpu_mask()
+    import torch._dynamo
+    import torch.distributed as dist
+    from tianshou.data import Batch
+
+    torch._dynamo.config.disable = True
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+        raise RuntimeError('Expected one allocated CUDA device; set CUDA_VISIBLE_DEVICES to one card')
+    torch.cuda.set_device(0)
+    seed_all(seed, torch)
+    with tempfile.TemporaryDirectory(prefix='pillow-eval-') as tmp:
+        dist.init_process_group('gloo', init_method=(Path(tmp)/'rdzv').as_uri(), rank=0, world_size=1)
+        try:
+            policy = load_policy(ckpt, verified)
+            head = policy.trained_model.action_head
+
+            @torch.inference_mode()
+            def predict(obs):
+                clear_window_cache(head)
+                seed_all(seed, torch)
+                head.seed = seed
+                return policy.lazy_joint_forward_causal(Batch(obs=obs))  # (actions, BCTHW video latent)
+
+            yield policy, predict
+        finally:
+            dist.destroy_process_group()

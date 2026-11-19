@@ -6,9 +6,9 @@
 |---|---|---|
 | [`data_prep/`](data_prep/) | 训练前处理数据 | `convert_aloha_to_dreamzero.py` 转格式，`check_aloha_alignment.py` 核对视频、state、action 是否对齐，`prepare_pillow_holdout.py` 按整条录制划分训练/留出。`aloha_video.py` 是视频辅助模块，`requirements-convert.txt` 是转换依赖。 |
 | [`training/`](training/) | 预检、冒烟训练、正式微调 | `train_flip_pillow_lora.py check / smoke / train`。这里的 `smoke` 会跑训练步，不是单元测试。 |
-| [`evaluation/`](evaluation/) | 验证模型 / 离线推理 | `eval_flip_pillow.py` 是比较 checkpoint 的入口；`pillow_eval_policy.py` 加载策略，`pillow_open_loop.py` 处理留出数据、动作窗口和指标。这些脚本不向真机发送动作。 |
+| [`evaluation/`](evaluation/) | 验证模型 / 离线推理 | `eval_flip_pillow.py` 比较 checkpoint 的动作；`visualize_pillow_eval.py` 把结果生成[离线动作网页](#pillow-eval-report)；`export_pillow_video.py` 用已有 checkpoint 导出[真实/预测视频对照](#pillow-video)。这些脚本不向真机发送动作。 |
 | [`monitoring/`](monitoring/) | 看训练日志，不跑模型 | `serve_loss.py` 开本地 loss 网页；`import_loss_to_wandb.py` 将已有 loss 日志导入 W&B。 |
-| [`tests/`](tests/) | 测代码是否正确，不评价 checkpoint | `test_aloha_temporal.py`、`test_pillow_open_loop.py`、`test_serve_loss.py`、`test_wandb_reporting.py`；不需要真机、GPU 或训练权重。 |
+| [`tests/`](tests/) | 测代码是否正确，不评价 checkpoint | 包含数据/动作对齐、报告、视频导出（`test_pillow_video.py`）与日志等 CPU 测试；不需要真机、GPU 或训练权重。 |
 | [`common/`](common/) | 供脚本导入，不直接运行 | `pillow.py`：本任务的指令、相机名、仓库路径以及数据和权重文件检查。 |
 | [`doc/`](doc/) | 历史实验记录 | [同事的 DreamZero 实验笔记](doc/DreamZero实验.md)，保留原位置。 |
 
@@ -270,3 +270,63 @@ python ws/src/evaluation/eval_flip_pillow.py --run "$RUN" --steps 1200 1600 2000
 开合事件是**指令值**的双阈值穿越，不是夹住枕头的物理接触。每侧从**训练集绝对夹爪指令**的 `q01..q99` 区间取 35% / 65% 作为关 / 开阈值；初始状态不记为事件。同段、同侧、同方向一对一，先最大化命中数再最小化总绝对帧差。默认容差 `--event-tolerance 25` 帧（50 Hz 名义 ±500 ms，1 帧=20 ms）；应在看结果前统一设定，不按 checkpoint 单独调整。优先看是否比 `hold_state` 好、是否在多数录制两臂都改善，然后看开/关漏报、误报与绝对时差；若二者冲突，不靠训练 loss 或单一平均数决定。用这 10 条反复选节点后，它们是**验证集**，不能再当独立真机成功率。
 
 可选 CPU 单测（不需要预训练权重或录制数据；从仓库根目录运行）：`python -m unittest discover -s ws/src/tests -p 'test_pillow_open_loop.py' -v`。`tests/` 只用于测代码，不是 GPU 推理依赖。
+
+<a id="pillow-eval-report"></a>
+### 只用本机浏览器看评估（不需要 W&B）
+
+**不要再跑模型。** `evaluation/visualize_pillow_eval.py` 读取上述评估输出的 CSV、`protocol.json` 和 `checkpoint-N/episode_*.npz`，生成自包含的 `report.html`。只需 Python + NumPy；在离线浏览器本地打开，无服务、端口、外部 JS/CDN 或 W&B 登录。它不会读取模型、训练集、视频或修改指标表。
+
+从**本机** DreamZero 仓库根目录执行，SSH 地址改成你平时登录用的：
+
+```bash
+DZ_SSH='omnisky@你的服务器IP'  # 或可直接 ssh 登录的别名
+EVAL=pillow_eval_smoke_01     # 正式对照完成后改为 pillow_eval_01
+mkdir -p results
+scp -r "$DZ_SSH:/data1/wp_ws/dreamzero-git/results/$EVAL" results/
+python ws/src/evaluation/visualize_pillow_eval.py "results/$EVAL"
+xdg-open "results/$EVAL/report.html"  # 也可在文件管理器里双击
+```
+
+如果脚本和同目录的 `pillow_eval_report.html` 模板已同步到服务器，也可以在服务器生成，只取回 `report.html` 一个文件。报告嵌入了评估动作轨迹，分享时按录制数据管理。再次生成只替换报告；可用 `--output 另一个名字.html` 指定现有目录内的其他路径。若正式对照中途停止，网页只显示汇总表里已完成的节点，提示计划未完成。
+
+- **节点对照**：与 `hold_state` 比左右臂 MAE / RMSE，单位 rad；夹爪 MAE 是原指令单位，不能与关节的弧度混在一起。
+- **动作曲线**：选原始录制/片段、关节或夹爪，可叠加所有已完成节点或只看一个。录制指令 GT 是 `action[t]` 而非实际从臂状态。横轴为原录制帧号，窗口之间不连预测线。滑块可读逐帧数值。
+- **夹爪**：在“此段夹爪事件”点“定位”跳转到相应夹爪的录制事件帧（误报则定位到预测帧）。按侧、方向查看漏报/误报、F1 和命中时差；没有命中的时差显示 `—`。单窗口仅验证流程，这不是生成的翻枕头视频或真机成功率。
+
+<a id="pillow-video"></a>
+### 7. 看枕头翻面的预测视频：左实录，右 DreamZero（不需要 W&B）
+
+**已有动作 `.npz` 没保存视频 latent，不能从它还原预测视频。** 这个入口只重跑所选窗口的推理，不重训，不要求先跑全套动作评估。先按文首说明将新版 `ws/src/` 同步到服务器（不要只拷主脚本）。复用上面动作冒烟通过的权重、数据、单卡环境及固定种子。
+
+我按本机原始录制 91 的相机检查了关键帧：第 168 帧黑胶带在上，右腕接近枕角；约 192 帧夹住枕角，216 帧开始抬起，240 帧枕头一度移向顶视画面边缘，264 帧已见红胶带，288 帧红面在上。这是**人工观察的实录**，不是对 `checkpoint-2000` 预测效果的判断。因此默认选以下五窗，而不是冒烟的第一窗：
+
+```bash
+# 服务器 (dreamzero)，仓库根目录
+cd /data1/wp_ws/dreamzero-git
+VIDEO=ws/src/evaluation/export_pillow_video.py
+RUN=checkpoints/flip_pillow_lora_01
+python "$VIDEO" --run "$RUN" --step 2000 --source-id 91 --check-only
+
+# CUDA_VISIBLE_DEVICES 应为你已分配的一张卡，例如与冒烟相同且仍分配给你的 GPU 1。
+# export CUDA_VISIBLE_DEVICES=1
+unset LOAD_TRT_ENGINE
+python "$VIDEO" --run "$RUN" --step 2000 --source-id 91 \
+  --anchors 168 192 216 240 264 --output results/pillow_video_2000_s91
+```
+
+每次指定**新输出目录**。如果想只做一个窗口，传 `--anchors 240`（预测 240→264 帧）。解码显存不足时可以加 `--tiled-decode` 只对 VAE 解码分块；它不解决模型本体放不进 GPU 的情况。比较 1200/1600 时分别改 `--step` 和 `--output`，固定其余参数和解码模式。换录制请同时给 `--source-id` 和该**原始录制**里的 `--anchors`；末尾不满 24 帧、跨暂停或不在留出集的选择会报错。
+
+**看结果**：把整个 `results/pillow_video_2000_s91/` 拷回本机，双击 `index.html`。无需开服务或联网，支持 0.25×/0.5× 慢放、逐帧和跳到指定窗口。也可以只用播放器打开 `comparison.mp4`；`windows.json` 给出每张图对应的原始帧号、节点、种子和视频帧率。MP4 含真实相机画面，按录制数据管理。
+
+```bash
+# 在本机仓库根目录（DZ_SSH 用你平时登录的 SSH 地址/别名）
+mkdir -p results
+scp -r "$DZ_SSH:/data1/wp_ws/dreamzero-git/results/pillow_video_2000_s91" results/
+xdg-open results/pillow_video_2000_s91/index.html
+```
+
+**如何读画面：**
+
+- 两侧都是 YAM 三视角：左上顶视，右上右腕，左下左腕，右下未使用。左侧用该节点的**官方 eval transform** 做相同裁剪、缩放和拼图；右侧直接用 `lazy_joint_forward_causal` 返回的 `video_pred` 及官方 `head.vae.decode`，不用动作曲线合成图像。
+- 视频按 [`_uniform_sample_from_language_ranges`](../../groot/vla/data/dataset/lerobot_sharded.py) 的步距取原始帧 `t+0,3,6,…,24`；在 50 Hz 下是 0、60、…、480 ms，导出的媒体帧率为 `50/3`。首个因果窗口由 1 个条件 latent + 2 个预测 latent 组成，Wan2.1 解出 9 张图：**第 1 张右图仅是条件帧重建**，后 8 张才是预测；不是 24 帧动作视频或训练日志中的 33 帧。解码参考仓库根目录 `socket_test_optimized_AR.py` 的 VAE 导出路径，但不启动 WebSocket。
+- 每个窗口只用起点的真实三路 RGB、关节状态和指令；未来实录只出现在显示对照的一侧，不进模型 forward；每个起点清缓存，固定噪声。连续两窗会保留两个边界画面——上一窗对该时刻的**预测**、下一窗该时刻的**起点重建**，不要当成真实时间内的突变。看红面何时出现、枕角是否跟着夹爪、夹爪是否穿过物体；这仅是短时开环视觉对照，不是真机闭环成功率。

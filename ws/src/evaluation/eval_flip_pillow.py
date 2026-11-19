@@ -5,9 +5,7 @@ import csv
 import json
 import multiprocessing as mp
 import os
-import random
 import sys
-import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -18,9 +16,9 @@ if not __package__:  # Make both the workspace packages and the official groot p
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from ws.src.common.pillow import TASK
-from ws.src.evaluation.pillow_eval_policy import load_policy, recipe
+from ws.src.evaluation.pillow_eval_policy import independent_policy, recipe, single_gpu_mask
 from ws.src.evaluation.pillow_open_loop import (
-    FPS, H, Holdout, action_chunk, anchor_images, crossings, match_events, metrics, read_rows,
+    FPS, H, Holdout, action_chunk, anchor_images, crossings, match_events, metrics, observation, read_rows,
 )
 
 SIDES = ('left', 'right')
@@ -48,8 +46,7 @@ def make_predictions(data, ep, n, state, predict):
     for t, images in anchor_images(ep, n):
         if t != end:
             raise ValueError(f'Non-contiguous anchors for episode {ep.id}: {t} not {end}')
-        obs = dict(images, **{'state.'+k: state[t:t+1, s].astype(np.float64) for k, s in data.state.items()})
-        obs['annotation.task'] = TASK
+        obs = observation(images, state[t], data.state)
         chunk = action_chunk(predict(obs), data.action)  # official unapply already returned absolute commands
         end = min(t + H, n)
         pred[t:end] = chunk[:end-t]
@@ -131,45 +128,9 @@ def evaluate_step(step, data, jobs, predict, output, tolerance, baseline=False):
     return reports
 
 
-def seed_all(seed, torch):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
 def gpu_step(step, ckpt, verified, data, jobs, opts, baseline):
-    # New process for each checkpoint: no GPU/compile cache or LoRA objects shared. No ROS or network server.
-    import torch._dynamo
-    import torch.distributed as dist
-    from tianshou.data import Batch
-
-    torch._dynamo.config.disable = True
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise RuntimeError('Expected one allocated CUDA device; set CUDA_VISIBLE_DEVICES to one card')
-    if 'LOAD_TRT_ENGINE' in os.environ:
-        raise ValueError('Unset LOAD_TRT_ENGINE: a prebuilt engine may contain different weights')
-    torch.cuda.set_device(0)
-    seed_all(opts.seed, torch)
-    with tempfile.TemporaryDirectory(prefix='pillow-eval-') as tmp:
-        dist.init_process_group('gloo', init_method=(Path(tmp)/'rdzv').as_uri(), rank=0, world_size=1)
-        try:
-            policy = load_policy(ckpt, verified)
-            head = policy.trained_model.action_head
-
-            @torch.inference_mode()
-            def predict(obs):
-                # Independent 24-step forecasts: do not carry past/predicted video or KV across anchors.
-                head.current_start_frame = 0
-                for name in ('language', 'clip_feas', 'ys', 'kv_cache1', 'kv_cache_neg', 'crossattn_cache', 'crossattn_cache_neg'):
-                    setattr(head, name, None)
-                seed_all(opts.seed, torch)
-                head.seed = opts.seed
-                result, _ = policy.lazy_joint_forward_causal(Batch(obs=obs))
-                return result.act
-
-            return evaluate_step(step, data, jobs, predict, opts.output, opts.event_tolerance, baseline)
-        finally:
-            dist.destroy_process_group()
+    with independent_policy(ckpt, verified, opts.seed) as (_, joint):
+        return evaluate_step(step, data, jobs, lambda obs: joint(obs)[0].act, opts.output, opts.event_tolerance, baseline)
 
 
 def save_tables(output, reports):
@@ -224,11 +185,7 @@ def main(opts):
                 pass
         print('预检通过（未加载模型，未运行推理，未写入文件）。')
         return
-    mask = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
-    if not mask or ',' in mask or mask == '-1' or int(os.environ.get('WORLD_SIZE', '1')) != 1:
-        raise ValueError('请直接用 python 启动，并设置 CUDA_VISIBLE_DEVICES 为一张已分配的 GPU；不需要 torchrun。')
-    if 'LOAD_TRT_ENGINE' in os.environ:
-        raise ValueError('请先 unset LOAD_TRT_ENGINE，以免复用其他模型的 TensorRT 权重')
+    mask = single_gpu_mask()
     if opts.output.is_symlink():
         raise ValueError(f'输出不能是软链接：{opts.output}')
     opts.output = opts.output.expanduser().resolve()

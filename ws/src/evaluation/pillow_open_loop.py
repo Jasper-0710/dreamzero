@@ -110,8 +110,8 @@ def read_rows(ep):
     return state, action
 
 
-def anchor_images(ep, n):
-    """Decode three RGB streams in presentation order. Only yield frame t, never t+1."""
+def selected_images(ep, n, wanted):
+    """Validate video PTS against rows [0,n); materialize RGB only for requested row numbers."""
     import av
     with ExitStack() as stack:
         readers = {}
@@ -126,12 +126,26 @@ def anchor_images(ep, n):
                 frame = next(stream, None)
                 if frame is None or frame.pts is None or frame.pts * frame.time_base * FPS != t:
                     raise ValueError(f'Video/row mismatch: episode {ep.id}, {k}, frame {t}')
-                if t % H == 0:
+                if t in wanted:
                     obs[k] = frame.to_ndarray(format='rgb24')[None, ...]
             if obs:
                 yield t, obs
         if n == ep.length and any(next(r, None) is not None for r in readers.values()):
             raise ValueError(f'Extra video frames after row {n-1}: episode {ep.id}')
+
+
+def anchor_images(ep, n):
+    """For action evaluation yield only the current image at each non-overlapping anchor."""
+    return selected_images(ep, n, range(0, n, H))
+
+
+def observation(images, state_row, layout):
+    """Single observation interface shared by action evaluation and video forecasts (no label)."""
+    obs = dict(images)
+    for key, span in layout.items():
+        obs['state.' + key] = state_row[None, span].astype(np.float64)
+    obs['annotation.task'] = TASK
+    return obs
 
 
 def action_chunk(act, layout):

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>翻枕头 · 离线动作对照</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f2f6f5;color:#172e39;font:15px/1.55 system-ui,sans-serif}main{max-width:1040px;margin:auto;padding:32px 16px 48px}h1{font-size:clamp(26px,4vw,38px);margin:4px 0}h2{font-size:20px;margin:0 0 4px}h3{font-size:15px;margin:16px 0 4px}p{margin:5px 0 13px}.kicker{color:#09685b;letter-spacing:.1em;font-weight:bold}.muted,small{color:#506571}.notice{color:#713f08;background:#fff2d5;padding:9px 13px;border-radius:6px;margin:9px 0}.card{background:white;border:1px solid #d4dfde;border-radius:12px;padding:clamp(12px,3vw,24px);margin-top:16px}.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:7px;text-align:right;white-space:nowrap;border-bottom:1px solid #e5eceb}th{font-size:13px;color:#415966;background:#eff5f4}th:first-child,td:first-child{text-align:left}.bar{display:block;background:#168273;height:4px;margin:2px 0 0 auto}.baseline .bar{background:#87959c}.controls,.legend{display:flex;gap:10px 18px;flex-wrap:wrap;margin:12px 0}.controls label{font-size:13px;font-weight:bold}.controls select,button{font:inherit;color:inherit;background:white;border:1px solid #a4b8b5;border-radius:5px;padding:4px 7px}.controls select{display:block;margin-top:3px}button{cursor:pointer;color:#006e62}.legend span{white-space:nowrap}.swatch{display:inline-block;width:20px;border-top:3px solid;margin:0 5px 3px 0}#plot{display:block;width:100%;min-width:510px;height:auto}.graph{overflow-x:auto}#plot text{font:12px system-ui,sans-serif;fill:#435965}#readout{font-variant-numeric:tabular-nums;color:#153f44}input[type=range]{width:100%;accent-color:#087b70}details{margin-top:12px}summary{cursor:pointer;font-weight:600}footer{margin:16px 2px;color:#536977}noscript{color:#922}
+</style></head>
+<body><main><header><div class="kicker">DREAMZERO / MOBILE ALOHA</div><h1>翻枕头 · 离线动作对照</h1><div id="coverage"></div><div id="notice"></div></header>
+<noscript>请在浏览器中启用 JavaScript 显示图表。不需要网络。</noscript>
+<section class="card"><h2>1. 哪个节点的动作更像录制？</h2><p class="muted">各条源录制等权，误差越小越好。hold_state 是“每个窗口保持起点实测姿态不动”的基线，不是模型。左右臂 MAE 的条形使用同一比例。</p>
+<div class="scroll"><table><thead><tr><th>节点</th><th>左臂 MAE (rad)</th><th>右臂 MAE (rad)</th><th>左臂 RMSE (rad)</th><th>右臂 RMSE (rad)</th><th>左夹爪 MAE</th><th>右夹爪 MAE</th></tr></thead><tbody id="errors"></tbody></table></div></section>
+<section class="card"><h2>2. 逐帧对照：录制指令 vs. 模型预测</h2><p class="muted">每条线是同一动作维度。横轴是原录制帧号；竖虚线是新预测窗口的起点，窗口间不连接预测线。切换到夹爪可看到开关阈值。</p>
+<div class="controls"><label>原始录制 / 片段<select id="episode"></select></label><label>动作维度<select id="channel"></select></label><label>显示节点<select id="model"></select></label></div>
+<div id="legend" class="legend"></div><div class="graph"><svg id="plot" viewBox="0 0 880 238" role="img" aria-label="当前动作维度的录制和预测曲线"></svg></div>
+<label for="frame">查看单帧数值（拖动或用方向键）</label><input type="range" id="frame" min="0" step="1" value="0"><output id="readout"></output>
+<details id="eventBox"><summary id="eventTitle">此段夹爪事件</summary><div class="scroll"><table><thead><tr><th>节点</th><th>夹爪</th><th>方向</th><th>结果</th><th>录制帧</th><th>预测帧</th><th>时差 (ms)</th><th>看曲线</th></tr></thead><tbody id="events"></tbody></table></div></details></section>
+<section class="card"><h2>3. 夹爪是否在该开、该关时动作？</h2><p class="muted" id="gripInfo"></p><div class="scroll"><table><thead><tr><th>节点</th><th>夹爪</th><th>方向</th><th>匹配</th><th>漏报</th><th>误报</th><th>F1 ↑</th><th>平均时差 (ms)</th><th>平均绝对时差 (ms)</th></tr></thead><tbody id="groups"></tbody></table></div></section>
+<footer>这是对留出录制的开环动作误差，不是训练 loss，也不是真机翻面视频或翻面成功率。</footer></main>
+<script type="application/json" id="report-data">__REPORT_DATA__</script>
+<script>
+'use strict';
+const D=JSON.parse(document.getElementById('report-data').textContent), $=id=>document.getElementById(id);
+const colors=['#087c73','#b45118','#7b48a1','#2569ab'], truth='#192d3d', label=s=>s==='hold_state'?s:`checkpoint-${s}`;
+const side=s=>s==='left'?'左':'右', dir=d=>d==='open'?'开':'关', statusName={matched:'匹配',missed:'漏报',extra:'误报'};
+const color=s=>colors[D.steps.indexOf(s)%colors.length], fmt=(v,n)=>v==null?'—':v.toFixed(n);
+function add(parent,tag,text){const e=document.createElement(tag);if(text!=null)e.textContent=text;parent.appendChild(e);return e;}
+function option(id,value,text){add($(id),'option',text).value=value;}
+function row(id,cells){const tr=add($(id),'tr');for(const v of cells)add(tr,'td',v??'—');return tr;}
+function channelName(name){const m=/^(left|right)_(joint_pos|gripper_pos)_(\d+)$/.exec(name);return !m?name:side(m[1])+(m[2]==='joint_pos'?`臂 · 关节 ${1+Number(m[3])}`:'夹爪 · 开合指令');}
+$('coverage').textContent=`${D.sources} 条源录制 · 每节点 ${D.frames.toLocaleString()} 帧 / ${D.blocks} 个窗口 · ${D.fps} Hz · ${D.horizon} 步预测`;
+const notices=[];
+if(D.limited)notices.push('这是限制录制数或窗口数的抽样评估，只用于检查流程，不用它选最佳节点。');
+if(D.steps.length<D.planned.length)notices.push(`仅显示已写完的节点 ${D.steps.join(' / ')}；计划为 ${D.planned.join(' / ')}。`);
+if(notices.length){$('notice').className='notice';$('notice').textContent=notices.join(' ');}
+$('gripInfo').textContent=`同侧、同方向，匹配容差 ±${D.tolerance} 帧。时差为正表示预测晚，为负表示预测早；没有匹配的时差显示“—”，不是 0。夹爪数值是录制指令单位，不是角度或距离。`;
+const keys=['left_arm_mae_rad','right_arm_mae_rad','left_arm_rmse_rad','right_arm_rmse_rad','left_gripper_mae','right_gripper_mae'];
+const maxMAE=Math.max(...D.summary.flatMap(r=>keys.slice(0,2).map(k=>r[k])))||1;
+for(const r of D.summary){const tr=row('errors',[label(r.checkpoint),...keys.map(k=>fmt(r[k],5))]);if(r.checkpoint==='hold_state')tr.className='baseline';keys.slice(0,2).forEach((k,j)=>{const b=add(tr.cells[j+1],'span');b.className='bar';b.style.width=(100*r[k]/maxMAE)+'%';});}
+for(const r of D.groups)row('groups',[label(r.checkpoint),side(r.side),dir(r.direction),r.grip_matched,r.grip_missed,r.grip_extra,fmt(r.grip_f1,3),fmt(r.grip_mean_lag_ms,1),fmt(r.grip_mean_abs_lag_ms,1)]);
+D.episodes.forEach((e,i)=>option('episode',i,`录制 ${e.source} / 段 ${e.id}（${e.n} 帧）`));
+D.names.forEach((n,j)=>option('channel',j,channelName(n)));option('model','all','全部已完成节点');D.steps.forEach(s=>option('model',s,label(s)));
+const currentEp=()=>D.episodes[+$('episode').value], selected=()=>$('model').value==='all'?D.steps:[$('model').value];
+const svg=$('plot'), L=72,R=858,T=21,B=192;
+function shape(tag,attrs,text){const n=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v] of Object.entries(attrs))n.setAttribute(k,v);if(text!=null)n.textContent=text;svg.appendChild(n);return n;}
+const line=(x1,y1,x2,y2,stroke,dash)=>shape('line',{x1,y1,x2,y2,stroke,'stroke-dasharray':dash||'none'});
+function draw(){
+ const e=currentEp(), j=+$('channel').value, steps=selected(), sig=D.names[j], grip=sig.includes('gripper'), unit=grip?'夹爪指令值':'关节角 (rad)';
+ const series=[['录制动作 GT',truth,e.gt[j]],...steps.map(s=>[label(s),color(s),e.preds[s][j]])];
+ const levels=grip?D.thresholds[sig.split('_')[0]]:[];
+ let lo=Infinity, hi=-Infinity; for(const a of [...series.map(s=>s[2]),levels])for(const v of a){lo=Math.min(lo,v);hi=Math.max(hi,v);}
+ const pad=(hi-lo)*.1||.005;lo-=pad;hi+=pad;
+ const X=t=>e.n===1?(L+R)/2:L+(R-L)*t/(e.n-1), Y=v=>B-(B-T)*(v-lo)/(hi-lo);
+ svg.replaceChildren();$('legend').replaceChildren();
+ shape('text',{x:L,y:13},unit);
+ for(let k=0;k<=4;k++){const v=lo+(hi-lo)*k/4;line(L,Y(v),R,Y(v),'#e4eae9');shape('text',{x:L-7,y:Y(v)+4,'text-anchor':'end'},v.toFixed(hi-lo<.01?5:3));}
+ for(const t of new Set(Array.from({length:6},(_,i)=>Math.round((e.n-1)*i/5)))){line(X(t),B,X(t),B+4,'#94a6a9');shape('text',{x:X(t),y:B+18,'text-anchor':'middle'},String(e.start+t));}
+ shape('text',{x:(L+R)/2,y:B+38,'text-anchor':'middle'},'原录制帧号');
+ for(const t of e.anchors.slice(1))line(X(t),T,X(t),B,'#a5b6b6','3 4');
+ levels.forEach((v,i)=>{line(L,Y(v),R,Y(v),'#987b42','6 5');shape('text',{x:R-3,y:Y(v)-3,'text-anchor':'end'},i?'开阈值':'关阈值');});
+ series.forEach(([name,c,values],idx)=>{
+   const key=add($('legend'),'span'), sw=add(key,'i');sw.className='swatch';sw.style.borderColor=c;key.append(document.createTextNode(name));
+   const starts=idx?e.anchors:[0]; starts.forEach((from,b)=>{const end=starts[b+1]??e.n;
+     if(end===from+1)shape('circle',{cx:X(from),cy:Y(values[from]),r:2.7,fill:c});
+     else{const points=[];for(let t=from;t<end;t++)points.push(`${X(t).toFixed(2)},${Y(values[t]).toFixed(2)}`);
+       shape('polyline',{points:points.join(' '),fill:'none',stroke:c,'stroke-width':idx?1.9:2.7,'stroke-dasharray':idx?'none':'7 3'});}
+   });
+ });
+ const cursor=line(0,T,0,B,'#657a88','2 3');const slider=$('frame');slider.max=e.n-1;slider.disabled=e.n===1;
+ function inspect(){const t=+slider.value;cursor.setAttribute('x1',X(t));cursor.setAttribute('x2',X(t));$('readout').textContent=`原帧 ${e.start+t}（段内 +${(t/D.fps).toFixed(2)} s） · `+series.map(([name,c,v])=>`${name}: ${fmt(v[t],5)}`).join('　');}
+ slider.oninput=inspect;inspect();
+ const events=D.events.filter(v=>v.episode_index===e.id&&steps.includes(v.checkpoint));$('eventTitle').textContent=`此段夹爪事件（${events.length} 条模型对照记录，可点“定位”）`;$('events').replaceChildren();
+ for(const v of events){const tr=row('events',[label(v.checkpoint),side(v.side),dir(v.direction),statusName[v.status],v.gt_source_frame,v.pred_source_frame,fmt(v.lag_ms,0)]);
+   const btn=add(add(tr,'td'),'button','定位');btn.onclick=()=>{const idx=D.names.indexOf(v.side+'_gripper_pos_0');if(idx<0)return;$('channel').value=idx;$('model').value=v.checkpoint;slider.value=(v.gt_source_frame??v.pred_source_frame)-e.start;draw();};}
+}
+// Start at the first recorded miss if present, so even a one-window smoke run is useful to inspect.
+const missed=D.events.find(v=>v.episode_index===currentEp().id&&v.status==='missed');
+if(missed){const j=D.names.indexOf(missed.side+'_gripper_pos_0');if(j>=0)$('channel').value=j;$('frame').max=currentEp().n-1;$('frame').value=missed.gt_source_frame-currentEp().start;$('eventBox').open=true;}
+$('episode').onchange=()=>{$('frame').value=0;draw();};$('channel').onchange=draw;$('model').onchange=draw;draw();
+</script></body></html>
