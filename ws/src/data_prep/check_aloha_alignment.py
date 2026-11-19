@@ -6,14 +6,18 @@ import io
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
 from PIL import Image
 
-from aloha_video import check_video
-from convert_aloha_to_dreamzero import ACTION, CAMERAS, SLICES, STATE, ep_path, read_jsonl, timestamps
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.data_prep.aloha_video import check_video
+from ws.src.data_prep.convert_aloha_to_dreamzero import ACTION, CAMERAS, SLICES, STATE, ep_path, read_jsonl, timestamps
 
 
 def decoded_samples(path, indices, width, height):

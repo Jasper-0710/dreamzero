@@ -3,14 +3,20 @@
 
 import argparse
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
 
-from convert_aloha_to_dreamzero import ACTION, STATE, ep_path, gear, relative_statistics, write_json, write_jsonl
-from train_flip_pillow_lora import VIEWS, check_data, jsonl, read_json
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.common.pillow import VIEWS, check_data, jsonl, read_json
+from ws.src.data_prep.convert_aloha_to_dreamzero import (
+    ACTION, STATE, ep_path, gear, relative_statistics, write_json, write_jsonl,
+)
 
 
 def prepare(full, stage, count):

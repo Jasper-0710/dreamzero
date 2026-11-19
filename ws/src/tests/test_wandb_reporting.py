@@ -8,8 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-import train_flip_pillow_lora as launcher
-from import_loss_to_wandb import read_history, write_history
+if __name__ == '__main__' and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.monitoring.import_loss_to_wandb import read_history, write_history
+from ws.src.training import train_flip_pillow_lora as launcher
 
 
 class ReportingTest(unittest.TestCase):

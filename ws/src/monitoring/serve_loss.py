@@ -8,7 +8,7 @@ from html import escape
 from pathlib import Path
 from wsgiref.simple_server import WSGIRequestHandler, make_server
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]  # repository containing checkpoints/
 METRICS = {
     'loss': ('总损失', '#175eab'),
     'action_loss_avg': ('动作损失 · 滑动平均', '#007b6c'),

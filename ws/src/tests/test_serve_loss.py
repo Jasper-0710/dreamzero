@@ -1,8 +1,12 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from serve_loss import make_app, snapshot
+if __name__ == '__main__' and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.monitoring.serve_loss import make_app, snapshot
 
 
 class LossPageTest(unittest.TestCase):

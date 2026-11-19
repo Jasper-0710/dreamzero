@@ -1,10 +1,15 @@
 """Small CPU-only regression tests; no recordings, robot, FFmpeg or training job needed."""
 
+import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
 
-from convert_aloha_to_dreamzero import HORIZON, SLICES, relative_statistics, source_spans, timestamps
+if __name__ == '__main__' and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.data_prep.convert_aloha_to_dreamzero import HORIZON, SLICES, relative_statistics, source_spans, timestamps
 
 
 class TemporalTests(unittest.TestCase):

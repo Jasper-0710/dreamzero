@@ -15,10 +15,14 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from aloha_video import jpeg_rows, write_video
+if not __package__:  # Also support launching this file by path.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ws.src.common.pillow import ROOT
+from ws.src.data_prep.aloha_video import jpeg_rows, write_video
 
 # Reuse the converter in THIS checkout; its CLI alone cannot extract embedded images.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts/data'))
+sys.path.insert(0, str(ROOT / 'scripts/data'))
 import convert_lerobot_to_gear as gear
 
 
