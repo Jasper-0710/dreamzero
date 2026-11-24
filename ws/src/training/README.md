@@ -64,6 +64,63 @@ W&B 在线网页记录改为 `--wandb_mode online`（需要网络和登录正常
 
 默认 2000 **优化步**，不是 2000 个 epoch；每 200 步保存、每卡 batch=1。沿用已有 LoRA 配方：学习率 `1e-5`、bf16、DeepSpeed ZeRO-2。先作为新数据的基线，再用留出集选择节点。
 
+## 使用 SwanLab 网页看 loss（替代 W&B）
+
+已接入 Transformers **原生** SwanLab callback，不用改模型、数据格式或 checkpoint 格式。
+项目依赖 `transformers==4.51.3` 已支持此接口；最低需要 4.50.0。不要为了日志工具盲目升级整个训练环境。
+
+### 1. 在服务器的 dreamzero 环境安装、登录
+
+```bash
+python -m pip install swanlab
+swanlab login
+```
+
+按终端提示在 SwanLab 网页获取 **SwanLab 自己的 API key** 后粘贴；不能使用 W&B key，不能把 key 写进启动脚本或发到聊天。
+
+### 2. 先检查云端记录，不加载模型、不占 GPU
+
+```bash
+python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow
+```
+
+这会创建一个名为 `connection-check` 的小实验并写入一条 `connection_test` 指标，不读取录制数据、不启动训练。
+确认终端打印了在线实验地址，且网页能看到该指标，再启动大模型。账号权限、服务器出口仍需此步实际确认。
+团队项目给测试脚本加 `--workspace 团队空间名`，训练启动器使用对应的 `--swanlab_workspace 团队空间名`。
+
+### 3. 已完成数据准备：直接训练并在线上报
+
+```bash
+./ws/src/training/launch_pillow_training.sh \
+  --mode train \
+  --train_dir data/flip_150 \
+  --gpus 1,2,3,4,5,6 \
+  --steps 4000 \
+  --save_steps 200 \
+  --batch_size 1 \
+  --run_name flip_150_lora_4000_swanlab_01 \
+  --report_to swanlab \
+  --swanlab_mode online \
+  --swanlab_project dreamzero-flip-pillow
+```
+
+`--mode train` 要求数据已经准备好；首次转换的新数据使用默认 `all`，任务确认/留出规则与上文保持一致。
+已有失败运行也可能占用了旧输出目录，请使用新 `--run_name`，不删除旧数据、不自动续训。
+`--report_to swanlab` **只启用 SwanLab，不同时启用 W&B**；残留的 W&B key 或离线设置不参与这个 callback。
+
+训练启动时 SwanLab 会打印项目/实验网页地址。网页看 `train/loss`、`train/grad_norm`、`train/learning_rate`；
+训练器上报时还会显示 `train/action_loss_avg`、`train/dynamics_loss_avg` 等细分指标。
+正式训练每 10 步记录总 loss；首次加载大模型时没有曲线属于正常等待。
+checkpoint 仍按原训练配方保存到本地 `checkpoints/.../checkpoint-*`，不会通过该 callback 上传模型；
+SwanLab 本地日志放在本次输出目录的 `swanlog/`，原有 `loss_log.jsonl` 仍然保留。
+代码仍填写内部必须的 `wandb_project` Hydra 字段，但这不表示创建了 W&B run。
+
+离线使用 `--swanlab_mode offline`，只在本地记录，**不能实时从云端网页看曲线**。
+若只想检查命令、不安装 SDK、不访问网络或 GPU，可在训练命令末尾加 `--dry_run`。
+
+接口依据：[SwanLab Transformers 集成](https://docs.swanlab.cn/guide_cloud/integration/integration-huggingface-transformers.html)、
+[官方环境变量说明](https://docs.swanlab.cn/api/environment-variable.html)。
+
 ## 只执行某个阶段
 
 ```bash
@@ -123,9 +180,12 @@ checkpoints/flip_150_lora_01_smoke/    单独冒烟时的输出
 | `--base_dir` | `checkpoints/DreamZero-AgiBot` |
 | `--wan_dir` | `checkpoints/Wan2.1-I2V-14B-480P` |
 | `--tokenizer_dir` | `checkpoints/umt5-xxl` |
-| `--report_to` | `none` 或 `wandb` |
+| `--report_to` | `none`、`wandb` 或 `swanlab` |
 | `--wandb_mode` | W&B 选 `online` / `offline` |
 | `--wandb_project` | W&B 项目名 |
+| `--swanlab_mode` | SwanLab 选 `online`（默认）/ `offline` |
+| `--swanlab_project` | SwanLab 项目名，默认 `dreamzero-flip-pillow` |
+| `--swanlab_workspace` | SwanLab 团队空间名，可选 |
 | `--dry_run` | 只打印计划，不实际执行 |
 
 非空 checkpoint 输出目录会拒绝覆盖，重做实验请改 `--output` 或 `--run_name`。底层训练只保留最近 5 个周期性 checkpoint；2000 / 200 的配置最终通常保留 1200、1400、1600、1800、2000。预检不能保证峰值显存足够，可先单独做冒烟测试。

@@ -8,7 +8,7 @@
 | [`training/`](training/) | 数据集可选的准备、预检、冒烟训练、正式微调 | 新数据集（如 `data/flip_150`）用 [`./ws/src/training/launch_pillow_training.sh --train_dir ... --gpus ...`](training/README.md)；复用底层 `train_flip_pillow_lora.py`。`smoke` 会跑训练步，不是单元测试。 |
 | [`evaluation/`](evaluation/) | 验证模型 / 离线推理 | `compare_pillow_checkpoints.py` 用多 GPU 一次生成同帧视频 + 动作对照网页；`eval_flip_pillow.py` 仅比较动作；`visualize_pillow_eval.py` 把结果生成[离线动作网页](#pillow-eval-report)；`export_pillow_video.py` 用已有 checkpoint 导出[真实/预测视频对照](#pillow-video)。这些脚本不向真机发送动作。 |
 | [`inference/`](inference/) | 在 GPU 服务器部署、让机器人只读取传感器 | [`serve_pillow.py` + `pillow_client.py`：checkpoint-1600 只读推理指南](inference/README.md)。录制帧 / 实时 ROS1 二选一，不向机械臂或底盘发送指令。 |
-| [`monitoring/`](monitoring/) | 看训练日志，不跑模型 | `serve_loss.py` 开本地 loss 网页；`import_loss_to_wandb.py` 将已有 loss 日志导入 W&B。 |
+| [`monitoring/`](monitoring/) | 看训练日志，不跑模型 | `serve_loss.py` 开本地 loss 网页；`check_swanlab.py` 无 GPU 测试 SwanLab 云端记录；`import_loss_to_wandb.py` 将已有 loss 日志导入 W&B。 |
 | [`tests/`](tests/) | 测代码是否正确，不评价 checkpoint | 包含数据/动作对齐、报告、视频导出（`test_pillow_video.py`）与日志等 CPU 测试；不需要真机、GPU 或训练权重。 |
 | [`common/`](common/) | 供脚本导入，不直接运行 | `pillow.py`：本任务的指令、相机名、仓库路径以及数据和权重文件检查。 |
 | [`doc/`](doc/) | 历史实验记录 | [同事的 DreamZero 实验笔记](doc/DreamZero实验.md)，保留原位置。 |
@@ -27,6 +27,13 @@ python -m unittest discover -s ws/src/tests -p 'test_*.py' -v
 DZ_SSH='omnisky@你的服务器IP'  # 或平时使用的 SSH 别名
 rsync -av --exclude='__pycache__/' --exclude='*.py[co]' ws/src/ "$DZ_SSH":/data1/wp_ws/dreamzero-git/ws/src/
 ```
+
+## SwanLab 云端 loss（替代 W&B）
+
+训练入口已支持 `--report_to swanlab --swanlab_mode online --swanlab_project dreamzero-flip-pillow`。
+先在服务器 dreamzero 环境安装 `swanlab`、执行 `swanlab login`，再用
+`python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow` 做不占 GPU 的连接测试。
+完整的同步后操作、六卡训练命令和离线选项见 [训练说明](training/README.md#使用-swanlab-网页看-loss替代-wb)。
 
 ## 先转换两条、核对，再转全量
 

@@ -75,9 +75,13 @@ def parser():
     p.add_argument('--steps', type=int, help='默认 train=2000，smoke=10')
     p.add_argument('--save-steps', '--save_steps', type=int, help='默认 train=每 200 步，smoke=最后一步')
     p.add_argument('--batch-size', '--batch_size', type=int, default=1, help='每张 GPU 的 batch size，默认 1')
-    p.add_argument('--report-to', '--report_to', choices=['none', 'wandb'], default='none')
+    p.add_argument('--report-to', '--report_to', choices=['none', 'wandb', 'swanlab'], default='none')
     p.add_argument('--wandb-mode', '--wandb_mode', choices=['online', 'offline'], help='仅 --report-to wandb 时有效')
     p.add_argument('--wandb-project', '--wandb_project', help='仅 --report-to wandb 时有效；不传则沿用 WANDB_PROJECT')
+    p.add_argument('--swanlab-mode', '--swanlab_mode', choices=['online', 'offline'],
+                   help='仅 SwanLab：默认 online，offline 仅本地记录，不实时显示云端网页')
+    p.add_argument('--swanlab-project', '--swanlab_project', help='仅 SwanLab：默认 dreamzero-flip-pillow')
+    p.add_argument('--swanlab-workspace', '--swanlab_workspace', help='仅 SwanLab：工作空间名，不传则使用个人空间或 SDK 配置')
     p.add_argument('--base_dir', type=Path, help='AgiBot 基座目录，默认 checkpoints/DreamZero-AgiBot')
     p.add_argument('--wan_dir', type=Path, help='Wan 组件目录，默认 checkpoints/Wan2.1-I2V-14B-480P')
     p.add_argument('--tokenizer_dir', type=Path, help='Tokenizer 目录，默认 checkpoints/umt5-xxl')
@@ -100,6 +104,12 @@ def validate_args(args):
         raise ValueError('--reuse-converted 只用于 prepare / all')
     if (args.wandb_mode or args.wandb_project) and args.report_to != 'wandb':
         raise ValueError('--wandb-mode / --wandb-project 需要同时设置 --report-to wandb')
+    swanlab_flags = (args.swanlab_mode, args.swanlab_project, args.swanlab_workspace)
+    if any(value is not None for value in swanlab_flags) and args.report_to != 'swanlab':
+        raise ValueError('--swanlab-mode / --swanlab-project / --swanlab-workspace 需要同时设置 --report-to swanlab')
+    for value in (args.swanlab_project, args.swanlab_workspace):
+        if value is not None and not value.strip():
+            raise ValueError('SwanLab 项目名和工作空间名不能是空字符串')
     return steps, save
 
 
@@ -125,6 +135,15 @@ def gpu_environment(args):
         env.pop('WANDB_DISABLED', None)
         if env.get('WANDB_MODE', '').lower() == 'disabled':
             env['WANDB_MODE'] = 'offline'
+    if args.report_to == 'swanlab':
+        # Explicit backend selection must not inherit an old disabled/local mode.
+        env['SWANLAB_MODE'] = args.swanlab_mode or 'online'
+        env['SWANLAB_PROJECT'] = (args.swanlab_project or env.get('SWANLAB_PROJECT', '').strip()
+                                  or 'dreamzero-flip-pillow')
+        if args.swanlab_workspace is not None:
+            env['SWANLAB_WORKSPACE'] = args.swanlab_workspace.strip()
+        # Older HF callbacks treat ANY nonempty SWANLAB_LOG_MODEL (even 'false') as enabled.
+        env.pop('SWANLAB_LOG_MODEL', None)
     for flag, key, default in (('base_dir', 'DZ_CKPT_DIR', 'DreamZero-AgiBot'),
                                ('wan_dir', 'WAN_CKPT_DIR', 'Wan2.1-I2V-14B-480P'),
                                ('tokenizer_dir', 'TOKENIZER_DIR', 'umt5-xxl')):

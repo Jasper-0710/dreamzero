@@ -2,6 +2,7 @@
 """Check or launch DreamZero's YAM LoRA recipe for the converted 50 Hz Mobile ALOHA dataset."""
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 import sys
@@ -13,7 +14,47 @@ if not __package__:  # Support python ws/src/training/train_flip_pillow_lora.py 
 from ws.src.common.pillow import ROOT, WAN_FILES, check_data, check_weights
 
 
-def reporting_options(backend):
+def configure_swanlab(output=None):
+    """Configure HF's native callback without authenticating or creating a run."""
+    try:
+        import swanlab  # noqa: F401 -- no run or GPU created in this process.
+    except ImportError as exc:
+        raise ValueError('当前 Python 无法导入 swanlab；请在服务器 dreamzero 环境运行 '
+                         'python -m pip install swanlab') from exc
+    # Native SwanLab reporting was added in transformers 4.50.0. Do not import
+    # the full Transformers/Torch stack merely to check its installed version.
+    from packaging.version import Version
+    try:
+        installed = version('transformers')
+    except PackageNotFoundError as exc:
+        raise ValueError('未安装 transformers；请按项目依赖安装 transformers==4.51.3') from exc
+    if Version(installed) < Version('4.50.0'):
+        raise ValueError(f'当前 transformers={installed} 不支持原生 SwanLab 上报；'
+                         '本项目要求 transformers==4.51.3，请不要直接升级到最新版')
+    mode = os.environ.get('SWANLAB_MODE', 'online').strip().lower()
+    if mode not in ('online', 'offline'):
+        raise ValueError('SwanLab 训练上报需要 online 或 offline；请通过启动器 --swanlab_mode 选择')
+    project = os.environ.get('SWANLAB_PROJECT', '').strip() or 'dreamzero-flip-pillow'
+    os.environ.update(SWANLAB_PROJECT=project, SWANLAB_PROJ_NAME=project, SWANLAB_MODE=mode,
+                      SWANLAB_DISABLE_GIT='True', SWANLAB_PROBE_GIT='false')
+    # HF 4.51.3 checks `is not None`, so setting this to 'false' is NOT sufficient.
+    os.environ.pop('SWANLAB_LOG_MODEL', None)
+    if output is not None:
+        logdir = str(Path(output) / 'swanlog')
+        # Legacy and current SDK spellings; keep logs next to local checkpoints.
+        os.environ.update(SWANLAB_LOGDIR=logdir, SWANLAB_LOG_DIR=logdir)
+    print(f'SwanLab 项目：{project}；模式={mode}；不上传 checkpoint。', flush=True)
+    if mode == 'offline':
+        print('当前为离线记录，不会生成实时云端网页曲线。', flush=True)
+    return project
+
+
+def reporting_options(backend, *, output=None):
+    if backend == 'swanlab':
+        configure_swanlab(output)
+        # Only one native callback: do NOT fall back to W&B or report_to=all.
+        # wandb_project is still a required field in DreamZero's base Hydra config.
+        return ['report_to=swanlab', 'wandb_project="dreamzero"']
     project = os.environ.get('WANDB_PROJECT', '').strip() or 'dreamzero'
     if backend == 'wandb':
         mode = os.environ.get('WANDB_MODE', 'online').lower()
@@ -43,19 +84,19 @@ def main():
     p.add_argument('--steps', type=int, help='默认 smoke=10，train=1000')
     p.add_argument('--save-steps', type=int, help='默认 smoke=最后一步，train=每 200 步（不超过总步数）')
     p.add_argument('--batch-size', type=int, default=1, help='每张卡的 batch，默认 1')
-    p.add_argument('--report-to', choices=['none', 'wandb'], default='none',
-                   help='默认 none 只写本地日志；wandb 使用 Trainer 原生上报，项目由 WANDB_PROJECT 指定')
+    p.add_argument('--report-to', choices=['none', 'wandb', 'swanlab'], default='none',
+                   help='默认 none 只写本地日志；wandb / swanlab 使用 Trainer 原生上报；推荐通过 launch_pillow_training.sh 设置项目参数')
     args = p.parse_args()
     steps = args.steps if args.steps is not None else (1000 if args.mode == 'train' else 10)
     save = args.save_steps if args.save_steps is not None else (min(200, steps) if args.mode == 'train' else steps)
     if not (1 <= save <= steps and args.batch_size >= 1):
         p.error('需要 1 <= save-steps <= steps，且 batch-size >= 1')
-    reporting = reporting_options(args.report_to)
 
     data = args.data.expanduser().resolve()
     base, wan, tokenizer = [Path(os.environ.get(var, ROOT / 'checkpoints' / name)).expanduser().resolve() for var, name in
                             [('DZ_CKPT_DIR', 'DreamZero-AgiBot'), ('WAN_CKPT_DIR', 'Wan2.1-I2V-14B-480P'), ('TOKENIZER_DIR', 'umt5-xxl')]]
     output = (args.output or ROOT / 'checkpoints' / f'flip_pillow_lora_{args.mode}').expanduser().resolve()
+    reporting = reporting_options(args.report_to, output=output)
     if not data.is_dir():
         p.error(f'找不到训练集：{data}。先运行 ws/src/data_prep/prepare_pillow_holdout.py；若另有独立测试数据，可显式用 --data 指向全量目录')
     check_data(data)
