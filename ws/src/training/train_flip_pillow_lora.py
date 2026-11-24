@@ -2,7 +2,6 @@
 """Check or launch DreamZero's YAM LoRA recipe for the converted 50 Hz Mobile ALOHA dataset."""
 
 import argparse
-from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 import sys
@@ -15,22 +14,12 @@ from ws.src.common.pillow import ROOT, WAN_FILES, check_data, check_weights
 
 
 def configure_swanlab(output=None):
-    """Configure HF's native callback without authenticating or creating a run."""
+    """Configure our explicit SDK callback without creating a run in the launcher."""
     try:
         import swanlab  # noqa: F401 -- no run or GPU created in this process.
     except ImportError as exc:
         raise ValueError('当前 Python 无法导入 swanlab；请在服务器 dreamzero 环境运行 '
                          'python -m pip install swanlab') from exc
-    # Native SwanLab reporting was added in transformers 4.50.0. Do not import
-    # the full Transformers/Torch stack merely to check its installed version.
-    from packaging.version import Version
-    try:
-        installed = version('transformers')
-    except PackageNotFoundError as exc:
-        raise ValueError('未安装 transformers；请按项目依赖安装 transformers==4.51.3') from exc
-    if Version(installed) < Version('4.50.0'):
-        raise ValueError(f'当前 transformers={installed} 不支持原生 SwanLab 上报；'
-                         '本项目要求 transformers==4.51.3，请不要直接升级到最新版')
     mode = os.environ.get('SWANLAB_MODE', 'online').strip().lower()
     if mode not in ('online', 'offline'):
         raise ValueError('SwanLab 训练上报需要 online 或 offline；请通过启动器 --swanlab_mode 选择')
@@ -52,9 +41,12 @@ def configure_swanlab(output=None):
 def reporting_options(backend, *, output=None):
     if backend == 'swanlab':
         configure_swanlab(output)
-        # Only one native callback: do NOT fall back to W&B or report_to=all.
+        # Disable HF's native integrations: older HF calls get_run() before init,
+        # which newer SwanLab SDKs reject. Attach exactly one callback in each
+        # worker via this factory (only world rank zero will create a run).
         # wandb_project is still a required field in DreamZero's base Hydra config.
-        return ['report_to=swanlab', 'wandb_project="dreamzero"']
+        return ['report_to=none', 'wandb_project="dreamzero"',
+                'trainer._target_=ws.src.training.swanlab_reporting.create_swanlab_trainer']
     project = os.environ.get('WANDB_PROJECT', '').strip() or 'dreamzero'
     if backend == 'wandb':
         mode = os.environ.get('WANDB_MODE', 'online').lower()

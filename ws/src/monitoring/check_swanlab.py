@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Test SwanLab logging before loading DreamZero; creates one tiny test experiment."""
+"""Exercise the actual training logging callback without a model or GPU."""
 
 import argparse
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -28,22 +29,21 @@ def main(argv=None):
     if args.workspace is not None:
         os.environ['SWANLAB_WORKSPACE'] = args.workspace.strip()
     output = args.output.expanduser().resolve()
-    project = configure_swanlab(output)
-    import swanlab
-    kwargs = dict(project=project, experiment_name='connection-check', mode=args.mode,
-                  logdir=str(output / 'swanlog'), config={'purpose': 'connection-test-not-training'})
-    workspace = os.environ.get('SWANLAB_WORKSPACE', '').strip()
-    if workspace:
-        kwargs['workspace'] = workspace
-    print('只创建一个连接测试实验并写入一条测试指标；不加载模型、不读取数据、不占用 GPU。', flush=True)
-    swanlab.init(**kwargs)
+    configure_swanlab(output)
+    from ws.src.training.swanlab_reporting import DreamZeroSwanLabCallback
+
+    callback = DreamZeroSwanLabCallback()
+    training_args = SimpleNamespace(output_dir=str(output), run_name='connection-check')
+    state = SimpleNamespace(is_world_process_zero=True, global_step=0)
+    print('使用训练同款 callback 创建一个测试实验；不加载模型、不读取数据、不占用 GPU。', flush=True)
     try:
-        swanlab.log({'connection_test': 1}, step=0)
+        callback.on_train_begin(training_args, state, None)
+        callback.on_log(training_args, state, None, logs={'connection_test': 1})
     finally:
-        swanlab.finish()
+        callback.on_train_end(training_args, state, None)
     print('SwanLab 初始化和日志写入流程已完成。', flush=True)
     if args.mode == 'online':
-        print('请确认上方打印了在线实验地址，并能在网页看到 connection_test；确认后再启动训练。')
+        print('请确认上方打印了在线实验地址，并能在网页看到 train/connection_test；确认后再启动训练。')
     else:
         print('这是离线测试，不验证云端访问，不生成实时云端网页。')
 

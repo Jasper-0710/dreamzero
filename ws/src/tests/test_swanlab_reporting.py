@@ -52,26 +52,24 @@ class SwanLabReportingTest(unittest.TestCase):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 launch.validate_args(self.args(*flags))
 
-    def test_native_reporting_does_not_init_sdk_or_upload_model(self):
+    def test_explicit_reporting_does_not_init_sdk_or_upload_model(self):
         for mode in ('online', 'offline'):
             sdk = Mock()
             env = {'SWANLAB_MODE': mode, 'SWANLAB_PROJECT': 'pillow-test', 'SWANLAB_LOG_MODEL': 'false',
                    'WANDB_MODE': 'online'}
             with (self.subTest(mode=mode), patch.dict(os.environ, env, clear=True),
-                  patch.dict(sys.modules, {'swanlab': sdk}), patch.object(train, 'version', return_value='4.51.3')):
+                  patch.dict(sys.modules, {'swanlab': sdk})):
                 options = train.reporting_options('swanlab', output=Path('/tmp/pillow-test'))
-                self.assertEqual(options, ['report_to=swanlab', 'wandb_project="dreamzero"'])
+                self.assertEqual(options, ['report_to=none', 'wandb_project="dreamzero"',
+                    'trainer._target_=ws.src.training.swanlab_reporting.create_swanlab_trainer'])
                 self.assertEqual(os.environ['SWANLAB_PROJ_NAME'], 'pillow-test')
                 self.assertEqual(os.environ['SWANLAB_LOGDIR'], '/tmp/pillow-test/swanlog')
                 self.assertEqual(os.environ['SWANLAB_LOG_DIR'], '/tmp/pillow-test/swanlog')
                 self.assertNotIn('SWANLAB_LOG_MODEL', os.environ)
                 sdk.init.assert_not_called()
 
-    def test_missing_sdk_or_old_transformers_fail_before_gpu(self):
+    def test_missing_sdk_fails_before_gpu(self):
         with patch.dict(sys.modules, {'swanlab': None}), self.assertRaisesRegex(ValueError, 'pip install swanlab'):
-            train.reporting_options('swanlab')
-        with (patch.dict(sys.modules, {'swanlab': Mock()}), patch.object(train, 'version', return_value='4.49.0'),
-              self.assertRaisesRegex(ValueError, 'transformers==4.51.3')):
             train.reporting_options('swanlab')
 
     def test_low_level_launch_selects_only_swanlab(self):
@@ -82,11 +80,12 @@ class SwanLabReportingTest(unittest.TestCase):
             argv = ['train', 'train', '--data', tmp, '--output', f'{tmp}/new-run', '--report-to', 'swanlab']
             with (patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', argv),
                   patch.dict(sys.modules, {'torch': torch, 'swanlab': sdk}),
-                  patch.object(train, 'version', return_value='4.51.3'), patch.object(train, 'check_data'),
+                  patch.object(train, 'check_data'),
                   patch.object(train, 'check_weights'), patch.object(os, 'chdir'), patch.object(os, 'execv') as run):
                 train.main()
                 options = run.call_args.args[1]
-                self.assertEqual([s for s in options if s.startswith('report_to=')], ['report_to=swanlab'])
+                self.assertEqual([s for s in options if s.startswith('report_to=')], ['report_to=none'])
+                self.assertIn('trainer._target_=ws.src.training.swanlab_reporting.create_swanlab_trainer', options)
                 self.assertIn('--nproc-per-node=6', options)
                 self.assertIn('upload_checkpoints=false', options)
                 self.assertEqual(os.environ['SWANLAB_LOGDIR'], f'{tmp}/new-run/swanlog')
@@ -97,14 +96,15 @@ class SwanLabReportingTest(unittest.TestCase):
             sdk = Mock()
             with (self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp,
                   patch.dict(os.environ, {'SWANLAB_LOG_MODEL': 'true'}, clear=True),
-                  patch.dict(sys.modules, {'swanlab': sdk}), patch.object(train, 'version', return_value='4.51.3'),
+                  patch.dict(sys.modules, {'swanlab': sdk}),
                   redirect_stdout(StringIO())):
                 check_swanlab.main(['--project', 'pillow-test', '--workspace', 'team', '--mode', mode, '--output', tmp])
                 self.assertEqual(sdk.init.call_args.kwargs['project'], 'pillow-test')
                 self.assertEqual(sdk.init.call_args.kwargs['workspace'], 'team')
                 self.assertEqual(sdk.init.call_args.kwargs['mode'], mode)
                 self.assertEqual(sdk.init.call_args.kwargs['logdir'], f'{tmp}/swanlog')
-                sdk.log.assert_called_once_with({'connection_test': 1}, step=0)
+                sdk.log.assert_called_once_with({'train/connection_test': 1., 'train/global_step': 0}, step=0)
+                sdk.get_run.assert_not_called()
                 sdk.finish.assert_called_once()
                 self.assertNotIn('torch', sdk.init.call_args.kwargs)
                 self.assertNotIn('SWANLAB_LOG_MODEL', os.environ)
@@ -114,7 +114,7 @@ class SwanLabReportingTest(unittest.TestCase):
         sdk = Mock()
         sdk.log.side_effect = RuntimeError('mock network error')
         with (patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {'swanlab': sdk}),
-              patch.object(train, 'version', return_value='4.51.3'), redirect_stdout(StringIO()),
+              redirect_stdout(StringIO()),
               self.assertRaisesRegex(RuntimeError, 'mock network error')):
             check_swanlab.main([])
         sdk.finish.assert_called_once()

@@ -32,7 +32,9 @@ rsync -av --exclude='__pycache__/' --exclude='*.py[co]' ws/src/ "$DZ_SSH":/data1
 
 训练入口已支持 `--report_to swanlab --swanlab_mode online --swanlab_project dreamzero-flip-pillow`。
 先在服务器 dreamzero 环境安装 `swanlab`、执行 `swanlab login`，再用
-`python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow` 做不占 GPU 的连接测试。
+`python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow` 做不占 GPU 的同款训练 callback 测试。
+训练通过 `training/swanlab_reporting.py` 显式初始化 SDK，绕过旧 Transformers 与新版 SwanLab 的
+`get_run()` 兼容问题；只由 world rank 0 写入一个实验，不更改官方训练器和 checkpoint 保存逻辑。
 完整的同步后操作、六卡训练命令和离线选项见 [训练说明](training/README.md#使用-swanlab-网页看-loss替代-wb)。
 
 ## 先转换两条、核对，再转全量

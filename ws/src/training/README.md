@@ -66,8 +66,12 @@ W&B 在线网页记录改为 `--wandb_mode online`（需要网络和登录正常
 
 ## 使用 SwanLab 网页看 loss（替代 W&B）
 
-已接入 Transformers **原生** SwanLab callback，不用改模型、数据格式或 checkpoint 格式。
-项目依赖 `transformers==4.51.3` 已支持此接口；最低需要 4.50.0。不要为了日志工具盲目升级整个训练环境。
+已通过 `swanlab_reporting.py` 接入 SwanLab 官方 SDK 的 `init / log / finish`，
+保留官方 `VLATrainer`，只增加标量日志 callback，不改模型、数据或 checkpoint 格式。
+不再使用 Transformers 自带的 SwanLab callback：部分旧 Transformers 期待 `get_run()` 在未初始化时返回
+`None`，而新版 SwanLab 会抛出 `No active Run. Call swanlab.init() first.`，导致训练在第 0 步退出。
+修复版不调用 `get_run()`，只在 torchrun worker 的 **world rank 0** 初始化一个实验，其他 rank 不写 SwanLab。
+无需因此升级或降级环境；项目的 `transformers==4.51.3` 依赖保持不变。
 
 ### 1. 在服务器的 dreamzero 环境安装、登录
 
@@ -84,7 +88,9 @@ swanlab login
 python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow
 ```
 
-这会创建一个名为 `connection-check` 的小实验并写入一条 `connection_test` 指标，不读取录制数据、不启动训练。
+这会使用**训练同款 callback** 完整走一遍 `on_train_begin → on_log → on_train_end`，
+创建一个名为 `connection-check` 的小实验并写入一条 `train/connection_test` 指标，
+不读取录制数据、不加载模型、不启动训练。测试会实际导入 Transformers 的基础 callback，但不占 GPU。
 确认终端打印了在线实验地址，且网页能看到该指标，再启动大模型。账号权限、服务器出口仍需此步实际确认。
 团队项目给测试脚本加 `--workspace 团队空间名`，训练启动器使用对应的 `--swanlab_workspace 团队空间名`。
 
@@ -98,7 +104,7 @@ python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow
   --steps 4000 \
   --save_steps 200 \
   --batch_size 1 \
-  --run_name flip_150_lora_4000_swanlab_01 \
+  --run_name flip_150_lora_4000_swanlab_02 \
   --report_to swanlab \
   --swanlab_mode online \
   --swanlab_project dreamzero-flip-pillow
@@ -107,6 +113,9 @@ python ws/src/monitoring/check_swanlab.py --project dreamzero-flip-pillow
 `--mode train` 要求数据已经准备好；首次转换的新数据使用默认 `all`，任务确认/留出规则与上文保持一致。
 已有失败运行也可能占用了旧输出目录，请使用新 `--run_name`，不删除旧数据、不自动续训。
 `--report_to swanlab` **只启用 SwanLab，不同时启用 W&B**；残留的 W&B key 或离线设置不参与这个 callback。
+内部打印的 Hydra 参数是 `report_to=none` 和
+`trainer._target_=ws.src.training.swanlab_reporting.create_swanlab_trainer`：
+这是有意关闭有兼容问题的原生集成，再由工厂为官方训练器添加修复版 callback，不是没有开启上报。
 
 训练启动时 SwanLab 会打印项目/实验网页地址。网页看 `train/loss`、`train/grad_norm`、`train/learning_rate`；
 训练器上报时还会显示 `train/action_loss_avg`、`train/dynamics_loss_avg` 等细分指标。
@@ -120,6 +129,27 @@ SwanLab 本地日志放在本次输出目录的 `swanlog/`，原有 `loss_log.js
 
 接口依据：[SwanLab Transformers 集成](https://docs.swanlab.cn/guide_cloud/integration/integration-huggingface-transformers.html)、
 [官方环境变量说明](https://docs.swanlab.cn/api/environment-variable.html)。
+
+### `No active Run` 修复后的同步和重试
+
+本机在项目根目录同步两个代码目录（不删除服务器上的其他文件）：
+
+```bash
+rsync -av --exclude='__pycache__/' --exclude='*.pyc' \
+  ws/src/training ws/src/monitoring \
+  omnisky@192.168.2.40:/data1/wp_ws/dreamzero-git/ws/src/
+```
+
+服务器先运行上述 `check_swanlab.py`，确认测试指标显示后再执行六卡训练命令。
+原失败日志停在 step 0；本次不必重新转换数据，用 `--mode train` 复用已准备的训练集。
+`_01` 目录可能已写入配置，即使没有训练 checkpoint 也不覆盖，例子改用 `_02`；若 `_02` 也被占用再换新名字。
+
+CPU 回归（SDK 使用测试替身，无网络/凭据/GPU）覆盖旧、新 `get_run()` 行为、六 rank 只建立一个实验、
+重复初始化/结束、动作/视频 loss 指标转发、保留官方训练器参数、不上传 checkpoint：
+
+```bash
+python -m unittest ws.src.tests.test_swanlab_callback ws.src.tests.test_swanlab_reporting -v
+```
 
 ## 只执行某个阶段
 
