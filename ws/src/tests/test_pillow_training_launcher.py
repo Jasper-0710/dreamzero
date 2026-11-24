@@ -157,7 +157,7 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(env['WANDB_MODE'], 'online')
             self.assertEqual(env['WANDB_PROJECT'], 'new-project')
 
-    def test_reject_invalid_gpu_masks_counts_and_trt(self):
+    def test_reject_invalid_gpu_masks_counts_and_ignore_old_trt(self):
         with patch.dict(os.environ, {}, clear=True):
             for mask in ('', '1-6', '1,,2', '1,1', '-1', 'all'):
                 with self.subTest(mask=mask), self.assertRaises(ValueError):
@@ -167,8 +167,11 @@ class LauncherTest(unittest.TestCase):
                     launch.gpu_environment(self.args('train', '--gpus', '1,2', '--num-gpus', count))
             with self.assertRaises(ValueError):
                 launch.gpu_environment(self.args())
-        with patch.dict(os.environ, {'LOAD_TRT_ENGINE': 'old.engine'}, clear=True), self.assertRaises(ValueError):
-            launch.gpu_environment(self.args('train', '--gpus', '1'))
+        with patch.dict(os.environ, {'LOAD_TRT_ENGINE': 'old.engine', 'WANDB_DISABLED': 'true'}, clear=True):
+            env = launch.gpu_environment(self.args('train', '--gpus', '1', '--report-to', 'wandb'))
+            self.assertNotIn('LOAD_TRT_ENGINE', env)
+            self.assertNotIn('WANDB_DISABLED', env)
+            self.assertIn('LOAD_TRT_ENGINE', os.environ)  # Parent shell is not changed.
 
     def test_dry_run_does_not_read_data_launch_process_or_write(self):
         with (patch.dict(os.environ, {}, clear=True), patch.object(launch, 'source_ids') as raw,
@@ -302,6 +305,97 @@ class LauncherTest(unittest.TestCase):
             self.run_main('prepare')
         self.assertEqual(run.call_count, 1)
         self.assertFalse(paths.train.exists())
+
+    def test_simple_cli_prepares_checks_and_trains_without_user_environment(self):
+        paths = launch.paths_for(self.args())
+        raw_fixture(paths.raw, task='pick_cup')
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1].endswith('convert_aloha_to_dreamzero.py'):
+                converted_fixture(paths.converted, paths.raw.name, self.origins)
+            elif cmd[1].endswith('prepare_pillow_holdout.py'):
+                split_fixture(paths, self.origins)
+
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'run_command', side_effect=fake_run) as run):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1,2,3,4,5,6', '--holdout', '1',
+                         '--save_steps', '200', '--batch_size', '1', '--report_to', 'none'])
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertEqual([Path(c[1]).name for c in calls], ['convert_aloha_to_dreamzero.py',
+                         *['check_aloha_alignment.py'] * 3, 'prepare_pillow_holdout.py',
+                         'train_flip_pillow_lora.py', 'train_flip_pillow_lora.py'])
+        self.assertEqual([c[2] for c in calls[-2:]], ['check', 'train'])
+        self.assertEqual(calls[0][-2:], ['--task-text', TASK])
+        self.assertEqual(run.call_args.kwargs['env']['NUM_GPUS'], '6')
+
+    def test_simple_cli_reuses_valid_prepared_data(self):
+        self.dataset()
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'prepare') as prep, patch.object(launch, 'run_command') as run):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1', '--holdout', '1'])
+        prep.assert_not_called()
+        self.assertEqual([c.args[0][2] for c in run.call_args_list], ['check', 'train'])
+
+    def test_simple_cli_reuses_conversion_and_creates_split(self):
+        paths = self.dataset(split=False)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1].endswith('prepare_pillow_holdout.py'):
+                split_fixture(paths, self.origins)
+
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'run_command', side_effect=fake_run) as run):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1', '--holdout', '1'])
+        self.assertEqual([Path(c.args[0][1]).name for c in run.call_args_list],
+                         [*['check_aloha_alignment.py'] * 3, 'prepare_pillow_holdout.py',
+                          'train_flip_pillow_lora.py', 'train_flip_pillow_lora.py'])
+
+    def test_simple_cli_failed_check_never_starts_training(self):
+        self.dataset()
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'run_command', side_effect=subprocess.CalledProcessError(3, 'check')) as run,
+              self.assertRaises(subprocess.CalledProcessError)):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1', '--holdout', '1'])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][2], 'check')
+
+    def test_simple_cli_nonempty_checkpoint_stops_before_preparation(self):
+        paths = launch.paths_for(self.args())
+        paths.output.mkdir(parents=True)
+        (paths.output / 'existing').write_text('keep me')
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'prepare') as prep, patch.object(launch, 'run_command') as run,
+              self.assertRaisesRegex(ValueError, '不覆盖')):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1'])
+        prep.assert_not_called()
+        run.assert_not_called()
+
+    def test_named_mode_and_weight_directory_flags(self):
+        paths = self.dataset()
+        with (patch.dict(os.environ, {'DZ_CKPT_DIR': '/old/base'}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'run_command') as run):
+            launch.main(['--mode', 'smoke', '--train_dir', 'data/flip_150', '--gpus', '1', '--holdout', '1',
+                         '--base_dir', 'weights/agibot', '--wan_dir', 'weights/wan',
+                         '--tokenizer_dir', 'weights/tokenizer', '--run_name', 'test_run'])
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[2], 'smoke')
+        self.assertEqual(cmd[cmd.index('--output') + 1], str(self.root / 'checkpoints/test_run_smoke'))
+        self.assertEqual(cmd[cmd.index('--data') + 1], str(paths.train))
+        env = run.call_args.kwargs['env']
+        self.assertEqual(env['DZ_CKPT_DIR'], str(self.root / 'weights/agibot'))
+        self.assertEqual(env['WAN_CKPT_DIR'], str(self.root / 'weights/wan'))
+        self.assertEqual(env['TOKENIZER_DIR'], str(self.root / 'weights/tokenizer'))
+
+    def test_simple_cli_dry_run_is_read_only(self):
+        with (patch.dict(os.environ, {}, clear=True), redirect_stdout(StringIO()),
+              patch.object(launch, 'source_ids') as raw, patch.object(launch, 'validate_training_view') as view,
+              patch.object(launch.subprocess, 'run') as run):
+            launch.main(['--train_dir', 'data/flip_150', '--gpus', '1,2,3,4,5,6', '--dry_run'])
+            launch.main(['--mode', 'prepare', '--train_dir', 'data/flip_150', '--dry_run'])
+        raw.assert_not_called()
+        view.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_subprocess_uses_same_python_repo_cwd_and_no_shell(self):
         cmd = launch.command('training/train_flip_pillow_lora.py', 'check', '--data', 'data/带 空格')

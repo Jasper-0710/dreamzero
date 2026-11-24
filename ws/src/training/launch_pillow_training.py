@@ -2,7 +2,8 @@
 """Dataset-selectable launcher for the existing Mobile ALOHA pillow LoRA recipe.
 
 This is ordinary task adaptation, NOT DreamZero-Flash and NOT checkpoint resume.
-Preparation is deliberately separate from GPU training. No model is loaded here.
+The default workflow prepares data if needed, checks it, then starts training.
+No model is loaded in this orchestration process.
 """
 
 import argparse
@@ -53,25 +54,32 @@ def paths_for(args):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('mode', choices=['prepare', 'check', 'smoke', 'train'],
-                   help='prepare 转换/对齐/留出；check 预检；smoke 10 步；train 正式训练')
-    p.add_argument('--dataset', required=True, type=Path, help='原始录制目录，例如 data/flip_150；相对路径均以仓库根目录为基准')
+    modes = ['all', 'prepare', 'check', 'smoke', 'train']
+    p.add_argument('mode', nargs='?', default='all', choices=modes,
+                   help='默认 all：按需准备 → 预检 → 训练；也兼容原位置参数')
+    p.add_argument('--mode', dest='selected_mode', choices=modes,
+                   help='可选阶段：prepare / check / smoke / train；默认 all')
+    p.add_argument('--train_dir', '--train-dir', '--dataset', dest='dataset', required=True, type=Path,
+                   help='原始录制目录，例如 data/flip_150；不是转换后的 _dz_train；相对路径按仓库根目录解析')
     p.add_argument('--converted', type=Path, help='转换输出目录，默认 <dataset>_dz')
-    p.add_argument('--train-data', type=Path, help='划分后的训练集目录，默认 <converted>_train')
+    p.add_argument('--train-data', '--train_data', type=Path, help='划分后的训练集目录，默认 <converted>_train')
     p.add_argument('--holdout', type=int, default=10, help='留出最后 N 条完整原始录制，默认 10；各阶段保持一致')
-    p.add_argument('--task-text', help='prepare 时显式修正原录制标签；当前仅支持红胶带面朝上的翻枕头任务')
-    p.add_argument('--reuse-converted', action='store_true', help='仅 prepare：显式复用已有转换结果，仍检查来源并重新核对对齐')
+    p.add_argument('--task-text', '--task_text', help='prepare 时显式修正原录制标签；当前仅支持红胶带面朝上的翻枕头任务')
+    p.add_argument('--reuse-converted', '--reuse_converted', action='store_true', help='仅 prepare：显式复用已有转换结果，仍检查来源并重新核对对齐')
     p.add_argument('--gpus', help='已分配的 GPU，逗号分隔，例如 1,2,3,4,5,6；否则使用 CUDA_VISIBLE_DEVICES')
-    p.add_argument('--num-gpus', type=int, help='训练进程数，默认使用所选 GPU 数；不沿用可能过期的 NUM_GPUS')
-    p.add_argument('--run-name', help='checkpoint 目录名，默认 <dataset目录名>_lora_01；smoke 自动加 _smoke')
+    p.add_argument('--num-gpus', '--num_gpus', type=int, help='训练进程数，默认使用所选 GPU 数；不沿用可能过期的 NUM_GPUS')
+    p.add_argument('--run-name', '--run_name', help='checkpoint 目录名，默认 <dataset目录名>_lora_01；smoke 自动加 _smoke')
     p.add_argument('--output', type=Path, help='显式指定 checkpoint 输出路径；已有非空目录不覆盖、不自动续训')
     p.add_argument('--steps', type=int, help='默认 train=2000，smoke=10')
-    p.add_argument('--save-steps', type=int, help='默认 train=每 200 步，smoke=最后一步')
-    p.add_argument('--batch-size', type=int, default=1, help='每张 GPU 的 batch size，默认 1')
-    p.add_argument('--report-to', choices=['none', 'wandb'], default='none')
-    p.add_argument('--wandb-mode', choices=['online', 'offline'], help='仅 --report-to wandb 时有效')
-    p.add_argument('--wandb-project', help='仅 --report-to wandb 时有效；不传则沿用 WANDB_PROJECT')
-    p.add_argument('--dry-run', action='store_true', help='只打印计划；不访问数据/权重、不建目录、不启动子进程或 GPU')
+    p.add_argument('--save-steps', '--save_steps', type=int, help='默认 train=每 200 步，smoke=最后一步')
+    p.add_argument('--batch-size', '--batch_size', type=int, default=1, help='每张 GPU 的 batch size，默认 1')
+    p.add_argument('--report-to', '--report_to', choices=['none', 'wandb'], default='none')
+    p.add_argument('--wandb-mode', '--wandb_mode', choices=['online', 'offline'], help='仅 --report-to wandb 时有效')
+    p.add_argument('--wandb-project', '--wandb_project', help='仅 --report-to wandb 时有效；不传则沿用 WANDB_PROJECT')
+    p.add_argument('--base_dir', type=Path, help='AgiBot 基座目录，默认 checkpoints/DreamZero-AgiBot')
+    p.add_argument('--wan_dir', type=Path, help='Wan 组件目录，默认 checkpoints/Wan2.1-I2V-14B-480P')
+    p.add_argument('--tokenizer_dir', type=Path, help='Tokenizer 目录，默认 checkpoints/umt5-xxl')
+    p.add_argument('--dry-run', '--dry_run', action='store_true', help='只打印计划；不访问数据/权重、不建目录、不启动子进程或 GPU')
     return p
 
 
@@ -84,8 +92,8 @@ def validate_args(args):
         raise ValueError('需要 1 <= save-steps <= steps')
     if args.task_text is not None and args.task_text.strip() != TASK:
         raise ValueError(f'当前训练/验证接口仅支持任务 {TASK!r}；其他任务需要先适配任务检查，不能静默改标签')
-    if args.reuse_converted and args.mode != 'prepare':
-        raise ValueError('--reuse-converted 只用于 prepare')
+    if args.reuse_converted and args.mode not in ('prepare', 'all'):
+        raise ValueError('--reuse-converted 只用于 prepare / all')
     if (args.wandb_mode or args.wandb_project) and args.report_to != 'wandb':
         raise ValueError('--wandb-mode / --wandb-project 需要同时设置 --report-to wandb')
     return steps, save
@@ -107,9 +115,16 @@ def gpu_environment(args):
         env['WANDB_MODE'] = args.wandb_mode
     if args.wandb_project:
         env['WANDB_PROJECT'] = args.wandb_project
-    # Never pass an engine for a different model to this unquantized LoRA recipe.
-    if env.get('LOAD_TRT_ENGINE'):
-        raise ValueError('普通 LoRA 训练请先 unset LOAD_TRT_ENGINE；本入口不加载 TensorRT 引擎')
+    # Runtime settings are managed here, not by user-written export/unset commands.
+    env.pop('LOAD_TRT_ENGINE', None)
+    if args.report_to == 'wandb':
+        env.pop('WANDB_DISABLED', None)
+        if env.get('WANDB_MODE', '').lower() == 'disabled':
+            env['WANDB_MODE'] = 'offline'
+    for flag, key, default in (('base_dir', 'DZ_CKPT_DIR', 'DreamZero-AgiBot'),
+                               ('wan_dir', 'WAN_CKPT_DIR', 'Wan2.1-I2V-14B-480P'),
+                               ('tokenizer_dir', 'TOKENIZER_DIR', 'umt5-xxl')):
+        env[key] = str(repo_path(getattr(args, flag) or ROOT / 'checkpoints' / default))
     return env
 
 
@@ -211,12 +226,17 @@ def prepare(args, paths):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    args.mode = args.selected_mode or args.mode
+    if args.mode == 'all' and args.task_text is None:
+        args.task_text = TASK
     steps, save = validate_args(args)
     paths = paths_for(args)
     print('=== Mobile ALOHA 翻枕头：普通 LoRA（非 Flash，不自动续训旧 checkpoint） ===', flush=True)
     for label, path in zip(('原始录制', '转换全量', '仅训练集', 'checkpoint'), vars(paths).values()):
         print(f'{label}: {path}', flush=True)
     print(f'留出原始录制数: {args.holdout}', flush=True)
+    if args.mode == 'all':
+        print(f'本任务指令: {args.task_text}（请确认本批全部是红胶带面朝上）', flush=True)
     if args.dry_run:
         print('DRY RUN：只展示计划，不验证数据/权重/显存，不写入文件或执行命令。', flush=True)
     if args.mode == 'prepare':
@@ -225,13 +245,25 @@ def main(argv=None):
     env = gpu_environment(args)
     print(f"CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}；训练进程数={env['NUM_GPUS']}", flush=True)
     if not args.dry_run:
-        validate_training_view(paths, args.holdout)
         if args.mode != 'check' and paths.output.exists() and (not paths.output.is_dir() or any(paths.output.iterdir())):
             raise ValueError(f'checkpoint 输出非空，不覆盖、不自动续训：{paths.output}；请选择新 --run-name 或 --output')
-    cmd = command('training/train_flip_pillow_lora.py', args.mode, '--data', paths.train,
-                  '--output', paths.output, '--steps', steps, '--save-steps', save,
-                  '--batch-size', args.batch_size, '--report-to', args.report_to)
-    run_command(cmd, env=env, dry_run=args.dry_run)
+    if args.mode == 'all':
+        if args.dry_run:
+            print('新数据计划如下；实际执行时，已有训练集先验证后复用，已有全量转换则核对后划分。', flush=True)
+        if args.dry_run or not (paths.train.exists() or paths.train.is_symlink()):
+            prep_args = argparse.Namespace(**vars(args))
+            prep_args.mode = 'prepare'
+            prep_args.reuse_converted = args.reuse_converted or (not args.dry_run and paths.converted.exists())
+            prepare(prep_args, paths)
+        else:
+            print('训练集已存在：校验后复用，不重新转换或划分。', flush=True)
+    if not args.dry_run:
+        validate_training_view(paths, args.holdout)
+    for mode in (('check', 'train') if args.mode == 'all' else (args.mode,)):
+        cmd = command('training/train_flip_pillow_lora.py', mode, '--data', paths.train,
+                      '--output', paths.output, '--steps', steps, '--save-steps', save,
+                      '--batch-size', args.batch_size, '--report-to', args.report_to)
+        run_command(cmd, env=env, dry_run=args.dry_run)
 
 
 if __name__ == '__main__':
