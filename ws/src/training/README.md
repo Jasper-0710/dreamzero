@@ -73,6 +73,12 @@ W&B 在线网页记录改为 `--wandb_mode online`（需要网络和登录正常
 修复版不调用 `get_run()`，只在 torchrun worker 的 **world rank 0** 初始化一个实验，其他 rank 不写 SwanLab。
 无需因此升级或降级环境；项目的 `transformers==4.51.3` 依赖保持不变。
 
+另一个已修复的配置兼容问题是 `error parsing value for field "project" from source
+"_QuoteAwareEnvSettingsSource"`：新版 SDK 把 `SWANLAB_PROJECT` 解释为结构化项目配置，不能写普通项目名。
+启动器改用兼容的 `SWANLAB_PROJ_NAME`，并显式传入 `swanlab.init(project=...)`；
+检测脚本、直接使用 callback、六卡启动路径都会在导入/初始化 SDK **之前**清理旧的普通字符串字段。
+仍然只需传 `--swanlab_project` / `--project` 参数，不用手动修改环境变量或重新登录。
+
 ### 1. 在服务器的 dreamzero 环境安装、登录
 
 ```bash

@@ -24,6 +24,11 @@ class DreamZeroSwanLabCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         if not state.is_world_process_zero or self._active:
             return
+        # Clean legacy scalar SWANLAB_PROJECT before the SDK reads its nested
+        # settings, including when this callback is invoked without our launcher.
+        from ws.src.training.train_flip_pillow_lora import configure_swanlab
+
+        project = configure_swanlab(args.output_dir)
         # Import and initialize only in rank zero, never in the torchrun parent.
         import swanlab
 
@@ -41,7 +46,7 @@ class DreamZeroSwanLabCallback(TrainerCallback):
         world = config.get('world_size', 1)
         config['effective_batch_size'] = batch * accum * world
         options = dict(
-            project=os.environ.get('SWANLAB_PROJECT', '').strip() or 'dreamzero-flip-pillow',
+            project=project,
             experiment_name=getattr(args, 'run_name', None) or output.name,
             mode=mode, logdir=str(output / 'swanlog'), config=config,
         )

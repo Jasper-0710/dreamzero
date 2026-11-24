@@ -24,12 +24,12 @@ def main(argv=None):
     args = p.parse_args(argv)
     if not args.project.strip() or (args.workspace is not None and not args.workspace.strip()):
         p.error('项目名和工作空间名不能为空')
-    os.environ.update(SWANLAB_PROJECT=args.project.strip(), SWANLAB_MODE=args.mode,
+    os.environ.update(SWANLAB_MODE=args.mode,
                       SWANLAB_ON_ONLINE_ERROR='raise')  # A connection test must not silently go offline.
     if args.workspace is not None:
         os.environ['SWANLAB_WORKSPACE'] = args.workspace.strip()
     output = args.output.expanduser().resolve()
-    configure_swanlab(output)
+    configure_swanlab(output, project=args.project.strip())
     from ws.src.training.swanlab_reporting import DreamZeroSwanLabCallback
 
     callback = DreamZeroSwanLabCallback()

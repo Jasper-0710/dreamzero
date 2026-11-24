@@ -24,12 +24,13 @@ class SwanLabReportingTest(unittest.TestCase):
                          '--swanlab_mode', 'online', '--swanlab_workspace', 'team')
         launch.validate_args(args)
         original = {'WANDB_MODE': 'offline', 'WANDB_DISABLED': 'true', 'SWANLAB_MODE': 'disabled',
-                    'SWANLAB_LOG_MODEL': 'true', 'LOAD_TRT_ENGINE': 'stale.engine'}
+                    'SWANLAB_PROJECT': 'old-project', 'SWANLAB_LOG_MODEL': 'true', 'LOAD_TRT_ENGINE': 'stale.engine'}
         with patch.dict(os.environ, original, clear=True):
             env = launch.gpu_environment(args)
             self.assertEqual(dict(os.environ), original)  # Parent terminal is not modified.
         self.assertEqual(env['SWANLAB_MODE'], 'online')
-        self.assertEqual(env['SWANLAB_PROJECT'], 'pillow-test')
+        self.assertEqual(env['SWANLAB_PROJ_NAME'], 'pillow-test')
+        self.assertNotIn('SWANLAB_PROJECT', env)
         self.assertEqual(env['SWANLAB_WORKSPACE'], 'team')
         self.assertEqual(env['NUM_GPUS'], '6')
         self.assertNotIn('SWANLAB_LOG_MODEL', env)
@@ -39,9 +40,40 @@ class SwanLabReportingTest(unittest.TestCase):
         with patch.dict(os.environ, {'SWANLAB_MODE': 'disabled'}, clear=True):
             env = launch.gpu_environment(self.args('--report-to', 'swanlab'))
             self.assertEqual(env['SWANLAB_MODE'], 'online')
-            self.assertEqual(env['SWANLAB_PROJECT'], 'dreamzero-flip-pillow')
+            self.assertEqual(env['SWANLAB_PROJ_NAME'], 'dreamzero-flip-pillow')
             env = launch.gpu_environment(self.args('--report-to', 'swanlab', '--swanlab-mode', 'offline'))
             self.assertEqual(env['SWANLAB_MODE'], 'offline')
+
+    def test_launcher_migrates_legacy_project_only_in_child_environment(self):
+        for original, expected in (({'SWANLAB_PROJECT': 'legacy-project'}, 'legacy-project'),
+                                   ({'SWANLAB_PROJECT': 'legacy-project',
+                                     'SWANLAB_PROJ_NAME': 'correct-project'}, 'correct-project')):
+            with self.subTest(original=original), patch.dict(os.environ, original, clear=True):
+                env = launch.gpu_environment(self.args('--report-to', 'swanlab'))
+                self.assertEqual(dict(os.environ), original)
+                self.assertEqual(env['SWANLAB_PROJ_NAME'], expected)
+                self.assertNotIn('SWANLAB_PROJECT', env)
+
+    def test_explicit_project_cleans_legacy_field_before_sdk_import(self):
+        import builtins
+        original_import = builtins.__import__
+        sdk = Mock()
+        imports = []
+
+        def guarded_import(name, *args, **kwargs):
+            if name == 'swanlab':
+                imports.append(name)
+                self.assertNotIn('SWANLAB_PROJECT', os.environ)
+                self.assertEqual(os.environ['SWANLAB_PROJ_NAME'], 'from-cli')
+            return original_import(name, *args, **kwargs)
+
+        with (patch.dict(os.environ, {'SWANLAB_PROJECT': 'old-project',
+                                     'SWANLAB_PROJ_NAME': 'old-correct-project'}, clear=True),
+              patch.dict(sys.modules, {'swanlab': sdk}),
+              patch('builtins.__import__', side_effect=guarded_import), redirect_stdout(StringIO())):
+            self.assertEqual(train.configure_swanlab(project='from-cli'), 'from-cli')
+        self.assertEqual(imports, ['swanlab'])
+        sdk.init.assert_not_called()
 
     def test_reject_wrong_backend_or_empty_names(self):
         for flags in (['--swanlab-mode', 'online'], ['--swanlab-project', 'p'],
@@ -63,6 +95,7 @@ class SwanLabReportingTest(unittest.TestCase):
                 self.assertEqual(options, ['report_to=none', 'wandb_project="dreamzero"',
                     'trainer._target_=ws.src.training.swanlab_reporting.create_swanlab_trainer'])
                 self.assertEqual(os.environ['SWANLAB_PROJ_NAME'], 'pillow-test')
+                self.assertNotIn('SWANLAB_PROJECT', os.environ)
                 self.assertEqual(os.environ['SWANLAB_LOGDIR'], '/tmp/pillow-test/swanlog')
                 self.assertEqual(os.environ['SWANLAB_LOG_DIR'], '/tmp/pillow-test/swanlog')
                 self.assertNotIn('SWANLAB_LOG_MODEL', os.environ)
@@ -95,7 +128,8 @@ class SwanLabReportingTest(unittest.TestCase):
         for mode in ('online', 'offline'):
             sdk = Mock()
             with (self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp,
-                  patch.dict(os.environ, {'SWANLAB_LOG_MODEL': 'true'}, clear=True),
+                  patch.dict(os.environ, {'SWANLAB_LOG_MODEL': 'true', 'SWANLAB_PROJECT': 'stale-project',
+                                          'SWANLAB_PROJ_NAME': 'stale-project'}, clear=True),
                   patch.dict(sys.modules, {'swanlab': sdk}),
                   redirect_stdout(StringIO())):
                 check_swanlab.main(['--project', 'pillow-test', '--workspace', 'team', '--mode', mode, '--output', tmp])
@@ -109,6 +143,7 @@ class SwanLabReportingTest(unittest.TestCase):
                 self.assertNotIn('torch', sdk.init.call_args.kwargs)
                 self.assertNotIn('SWANLAB_LOG_MODEL', os.environ)
                 self.assertEqual(os.environ['SWANLAB_ON_ONLINE_ERROR'], 'raise')
+                self.assertNotIn('SWANLAB_PROJECT', os.environ)
 
     def test_connection_check_cleans_up_after_log_error(self):
         sdk = Mock()

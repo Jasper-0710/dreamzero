@@ -13,18 +13,18 @@ if not __package__:  # Support python ws/src/training/train_flip_pillow_lora.py 
 from ws.src.common.pillow import ROOT, WAN_FILES, check_data, check_weights
 
 
-def configure_swanlab(output=None):
+def configure_swanlab(output=None, *, project=None):
     """Configure our explicit SDK callback without creating a run in the launcher."""
-    try:
-        import swanlab  # noqa: F401 -- no run or GPU created in this process.
-    except ImportError as exc:
-        raise ValueError('当前 Python 无法导入 swanlab；请在服务器 dreamzero 环境运行 '
-                         'python -m pip install swanlab') from exc
+    # SDK 0.8+ treats SWANLAB_PROJECT as a nested ProjectSettings object, not a
+    # project-name string. Migrate our old scalar spelling BEFORE importing the
+    # SDK, since settings may be read at import/initialization time.
+    legacy_project = os.environ.pop('SWANLAB_PROJECT', '').strip()
+    project = (project or os.environ.get('SWANLAB_PROJ_NAME', '').strip()
+               or legacy_project or 'dreamzero-flip-pillow')
     mode = os.environ.get('SWANLAB_MODE', 'online').strip().lower()
     if mode not in ('online', 'offline'):
         raise ValueError('SwanLab 训练上报需要 online 或 offline；请通过启动器 --swanlab_mode 选择')
-    project = os.environ.get('SWANLAB_PROJECT', '').strip() or 'dreamzero-flip-pillow'
-    os.environ.update(SWANLAB_PROJECT=project, SWANLAB_PROJ_NAME=project, SWANLAB_MODE=mode,
+    os.environ.update(SWANLAB_PROJ_NAME=project, SWANLAB_MODE=mode,
                       SWANLAB_DISABLE_GIT='True', SWANLAB_PROBE_GIT='false')
     # HF 4.51.3 checks `is not None`, so setting this to 'false' is NOT sufficient.
     os.environ.pop('SWANLAB_LOG_MODEL', None)
@@ -32,6 +32,11 @@ def configure_swanlab(output=None):
         logdir = str(Path(output) / 'swanlog')
         # Legacy and current SDK spellings; keep logs next to local checkpoints.
         os.environ.update(SWANLAB_LOGDIR=logdir, SWANLAB_LOG_DIR=logdir)
+    try:
+        import swanlab  # noqa: F401 -- no run or GPU created in this process.
+    except ImportError as exc:
+        raise ValueError('当前 Python 无法导入 swanlab；请在服务器 dreamzero 环境运行 '
+                         'python -m pip install swanlab') from exc
     print(f'SwanLab 项目：{project}；模式={mode}；不上传 checkpoint。', flush=True)
     if mode == 'offline':
         print('当前为离线记录，不会生成实时云端网页曲线。', flush=True)

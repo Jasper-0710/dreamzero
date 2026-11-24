@@ -24,6 +24,8 @@ class SwanLabCallbackTest(unittest.TestCase):
         for new_sdk in (False, True):
             with self.subTest(new_sdk=new_sdk):
                 sdk = Mock()
+                # Newer SDK settings must never see a plain SWANLAB_PROJECT.
+                sdk.init.side_effect = lambda **_: self.assertNotIn('SWANLAB_PROJECT', os.environ)
                 sdk.get_run.return_value = None
                 if new_sdk:
                     sdk.get_run.side_effect = RuntimeError('No active Run. Call swanlab.init() first.')

@@ -138,8 +138,9 @@ def gpu_environment(args):
     if args.report_to == 'swanlab':
         # Explicit backend selection must not inherit an old disabled/local mode.
         env['SWANLAB_MODE'] = args.swanlab_mode or 'online'
-        env['SWANLAB_PROJECT'] = (args.swanlab_project or env.get('SWANLAB_PROJECT', '').strip()
-                                  or 'dreamzero-flip-pillow')
+        legacy_project = env.pop('SWANLAB_PROJECT', '').strip()
+        env['SWANLAB_PROJ_NAME'] = (args.swanlab_project or env.get('SWANLAB_PROJ_NAME', '').strip()
+                                    or legacy_project or 'dreamzero-flip-pillow')
         if args.swanlab_workspace is not None:
             env['SWANLAB_WORKSPACE'] = args.swanlab_workspace.strip()
         # Older HF callbacks treat ANY nonempty SWANLAB_LOG_MODEL (even 'false') as enabled.
