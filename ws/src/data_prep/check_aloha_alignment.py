@@ -67,6 +67,11 @@ def compare(args):
         original = raw.read(columns=fixed).slice(lo, length)
         if not original.equals(numeric.select(fixed)):
             raise ValueError('At least one source state/action/diagnostic row is not copied unchanged')
+        source_ids = np.unique(raw.read(columns=['task_index']).slice(lo, length)['task_index'].to_numpy())
+        source_tasks = {t['task_index']: t['task'] for t in read_jsonl(src / 'meta/tasks.jsonl')}
+        if (source_ids.tolist() != [origin['source_task_index']] or
+                source_tasks.get(origin['source_task_index']) != origin['source_task']):
+            raise ValueError('Source task provenance differs from the original recording')
         langcol = mod['annotation']['task']['original_key']
         ids = np.unique(numeric[langcol].to_numpy())
         if ids.tolist() != [origin['task_index']]:

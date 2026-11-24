@@ -269,6 +269,27 @@ class LauncherTest(unittest.TestCase):
                 self.run_main('prepare')
         self.assertEqual(run.call_args.args[0][-1], '--keep-task-text')
 
+    def test_multiple_old_labels_are_inspected_by_converter_and_confirmation_is_forwarded(self):
+        paths = launch.paths_for(self.args('prepare'))
+        raw_fixture(paths.raw, task='pick_cup')
+        write_jsonl(paths.raw / 'meta/tasks.jsonl', [
+            {'task_index': 0, 'task': 'pick_cup'}, {'task_index': 1, 'task': 'flip_the_pillow'}])
+        for confirm in ([], ['--confirm_same_task'], ['--confirm-same-task']):
+            with (self.subTest(confirm=confirm),
+                  patch.object(launch, 'run_command', side_effect=RuntimeError('stop at converter')) as run):
+                with self.assertRaisesRegex(RuntimeError, 'stop at converter'):
+                    self.run_main('prepare', '--task-text', TASK, *confirm)
+                cmd = run.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--task-text') + 1], TASK)
+                self.assertEqual('--confirm-same-task' in cmd, bool(confirm))
+
+    def test_confirm_same_task_requires_explicit_instruction_and_preparation_mode(self):
+        for mode, flags in [('all', []), ('prepare', []), ('train', ['--task_text', TASK])]:
+            with (self.subTest(mode=mode), patch.object(launch, 'run_command') as run,
+                  self.assertRaisesRegex(ValueError, '--confirm_same_task')):
+                self.run_main(mode, '--confirm_same_task', *flags)
+            run.assert_not_called()
+
     def test_prepare_requires_explicit_relabel_and_valid_holdout(self):
         paths = launch.paths_for(self.args('prepare'))
         raw_fixture(paths.raw, task='pick_cup')

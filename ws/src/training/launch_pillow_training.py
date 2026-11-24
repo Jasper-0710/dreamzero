@@ -65,6 +65,8 @@ def parser():
     p.add_argument('--train-data', '--train_data', type=Path, help='划分后的训练集目录，默认 <converted>_train')
     p.add_argument('--holdout', type=int, default=10, help='留出最后 N 条完整原始录制，默认 10；各阶段保持一致')
     p.add_argument('--task-text', '--task_text', help='prepare 时显式修正原录制标签；当前仅支持红胶带面朝上的翻枕头任务')
+    p.add_argument('--confirm-same-task', '--confirm_same_task', action='store_true',
+                   help='与 --task_text 配合：明确确认不同旧标签对应的录制实际上全部是同一翻枕头任务')
     p.add_argument('--reuse-converted', '--reuse_converted', action='store_true', help='仅 prepare：显式复用已有转换结果，仍检查来源并重新核对对齐')
     p.add_argument('--gpus', help='已分配的 GPU，逗号分隔，例如 1,2,3,4,5,6；否则使用 CUDA_VISIBLE_DEVICES')
     p.add_argument('--num-gpus', '--num_gpus', type=int, help='训练进程数，默认使用所选 GPU 数；不沿用可能过期的 NUM_GPUS')
@@ -92,6 +94,8 @@ def validate_args(args):
         raise ValueError('需要 1 <= save-steps <= steps')
     if args.task_text is not None and args.task_text.strip() != TASK:
         raise ValueError(f'当前训练/验证接口仅支持任务 {TASK!r}；其他任务需要先适配任务检查，不能静默改标签')
+    if args.confirm_same_task and (args.task_text is None or args.mode not in ('all', 'prepare')):
+        raise ValueError('--confirm_same_task 仅用于 all / prepare，且需要显式传 --task_text；不要用于合并真实不同的任务')
     if args.reuse_converted and args.mode not in ('prepare', 'all'):
         raise ValueError('--reuse-converted 只用于 prepare / all')
     if (args.wandb_mode or args.wandb_project) and args.report_to != 'wandb':
@@ -187,6 +191,8 @@ def prepare(args, paths):
     convert = command('data_prep/convert_aloha_to_dreamzero.py', '--input', paths.raw, '--output', paths.converted)
     # Label replacement must be explicitly requested, even if the old recorder used "pick_cup".
     convert += ['--task-text', TASK] if args.task_text else ['--keep-task-text']
+    if args.confirm_same_task:
+        convert += ['--confirm-same-task']
     split = command('data_prep/prepare_pillow_holdout.py', '--input', paths.converted,
                     '--output', paths.train, '--holdout', args.holdout)
     if args.dry_run:
@@ -211,8 +217,9 @@ def prepare(args, paths):
         if args.reuse_converted:
             raise ValueError('--reuse-converted 指定的转换目录不存在')
         tasks = jsonl(paths.raw / 'meta/tasks.jsonl')
-        if len(tasks) != 1 or (not args.task_text and tasks[0]['task'] != TASK):
+        if not args.task_text and any(t['task'] != TASK for t in tasks):
             raise ValueError(f'原始任务标签为 {tasks!r}；确认全部录制均为红面朝上后显式传 --task-text {TASK!r}')
+        print(f'原始任务表：{tasks!r}；转换器将先读取每条录制的 task_index，统计实际使用的标签。', flush=True)
         run_command(convert)
     validate_conversion(paths)
     n = read_json(paths.converted / 'meta/info.json')['total_episodes']
@@ -227,7 +234,7 @@ def prepare(args, paths):
 def main(argv=None):
     args = parser().parse_args(argv)
     args.mode = args.selected_mode or args.mode
-    if args.mode == 'all' and args.task_text is None:
+    if args.mode == 'all' and args.task_text is None and not args.confirm_same_task:
         args.task_text = TASK
     steps, save = validate_args(args)
     paths = paths_for(args)

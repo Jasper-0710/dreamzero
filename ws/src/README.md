@@ -43,7 +43,7 @@ ffmpeg -hide_banner -encoders | grep libx264
 ffprobe -version | head -1
 ```
 
-当前 `data/flip_the_pillow/meta/info.json` 记载 **101 条 episode、51,934 个控制步、50 Hz**，三个相机均为 **640×480**。原始 `tasks.jsonl` 写的是 **`pick_cup`**。这批示范已确认都是翻到红胶带面朝上，请显式传 `--task-text`；该操作只改**输出**任务表，不会更改原始录制。如果原始标签正确，可改用 `--keep-task-text`。多任务数据不允许用一个 `--task-text` 覆盖。
+当前 `data/flip_the_pillow/meta/info.json` 记载 **101 条 episode、51,934 个控制步、50 Hz**，三个相机均为 **640×480**。原始 `tasks.jsonl` 写的是 **`pick_cup`**。这批示范已确认都是翻到红胶带面朝上，请显式传 `--task-text`；该操作只改**输出**任务表，不会更改原始录制。如果原始标签正确，可改用 `--keep-task-text`。转换器按实际录制的 `task_index` 统计使用情况，任务表里未使用的历史标签不会触发多任务拦截。若同一真实任务混用了多个旧标签，必须在 `--task-text` 之外显式加 `--confirm-same-task` 才会统一输出任务与 `task_index=0`，并保留原标签来源；真正不同的任务不得用该选项合并。训练启动器对应参数为 `--task_text` 和 `--confirm_same_task`，见 [training/README.md](training/README.md)。
 
 ```bash
 # 1. 小样本：源 episode 0、1；不会启动训练

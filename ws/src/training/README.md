@@ -28,6 +28,22 @@
 
 请确认本批仍全部是“红胶带面朝上”的任务；默认完整流程会用该指令替换输出标签，即使原录制误标为 `pick_cup`。原始数据不修改。不要拿此入口给其他任务统一改标签。仅支持目前相同的 Mobile ALOHA 三相机、14 维、50 Hz 数据；先停止录制，不要边训练边向本次原始目录追加数据。
 
+### 同一任务混用了多个旧标签（例如 `pick_cup` / `flip_the_pillow`）
+
+转换器会先只读取每条录制的 `task_index` 列，打印实际使用的标签和对应录制数量，不把任务表里未使用的历史标签当作多任务。若实际录制用了多个标签，单独传 `--task_text` 不会自动合并，以免把真实抓杯子数据误当作翻枕头。
+
+**仅当你确认整批实际上全部都是“翻到红胶带面朝上”**时，使用：
+
+```bash
+./ws/src/training/launch_pillow_training.sh \
+  --train_dir data/flip_150 \
+  --gpus 1,2,3,4,5,6 \
+  --task_text 'Flip the pillow over so the side with the red tape faces up.' \
+  --confirm_same_task
+```
+
+`--confirm_same_task` 必须与显式的 `--task_text` 配合。仅输出数据统一为一条任务、所有输出 Parquet 的 `task_index=0`；原标签和 ID 仍保存于 `meta/source_episodes.jsonl`，使用情况与映射记录在 `meta/conversion.json`。不会修改原始数据，也不会改变 state/action 数值或时间对齐。若确有其他任务，请先按真实任务分开数据，不能靠确认参数修复。
+
 ## 完整参数示例
 
 ```bash
@@ -97,6 +113,8 @@ checkpoints/flip_150_lora_01_smoke/    单独冒烟时的输出
 | `--converted` | `<train_dir>_dz` |
 | `--train_data` | `<converted>_train` |
 | `--holdout` | 10 条完整原始录制 |
+| `--task_text` | 显式输出任务指令；兼容 `--task-text` |
+| `--confirm_same_task` | 仅 all / prepare，与显式 `--task_text` 配合，确认多个旧标签实际是同一任务；兼容 `--confirm-same-task` |
 | `--steps` | train=2000，smoke=10 |
 | `--save_steps` | train=200（不超过总步数），smoke=最后一步 |
 | `--batch_size` | 每卡 1 |

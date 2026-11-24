@@ -190,7 +190,41 @@ def relative_statistics(pairs):
     return out
 
 
-def output_info(source, episodes, used_tasks):
+def plan_tasks(root, info, episodes, tasks, task_text, confirm_same_task=False):
+    """Inspect actual task references before encoding; unused historical labels are harmless."""
+    if confirm_same_task and not task_text:
+        raise ValueError('--confirm-same-task requires an explicit --task-text')
+    usage = {}
+    for ep in episodes:
+        path = ep_path(root, DATA, ep['episode_index'], info['chunks_size'])
+        with pq.ParquetFile(path) as pf:
+            column = pf.read(columns=['task_index'])['task_index']
+        if column.type != pa.int64() or column.null_count or len(column) != ep['length']:
+            raise ValueError(f'{path}: invalid task_index type, nulls or row count')
+        ids = np.unique(column.to_numpy()).tolist()
+        if (len(ids) != 1 or not 0 <= ids[0] < len(tasks) or
+                ep['tasks'] != [tasks[ids[0]]['task']]):
+            raise ValueError(f'{path}: Expected one consistent source task per recorded episode')
+        task = ids[0]
+        usage[task] = usage.get(task, 0) + 1
+    summary = [{'source_task_index': idx, 'source_task': tasks[idx]['task'], 'recordings': count}
+               for idx, count in usage.items()]
+    print(f'Actual source task usage ({len(episodes)} recordings): {summary!r}', flush=True)
+    if task_text is not None and len(usage) > 1 and not confirm_same_task:
+        raise ValueError(
+            f'实际录制使用多个任务标签：{summary!r}。--task-text 不会自动合并多个任务；'
+            '仅当确认这些录制实际上全部是同一任务时，同时传 --confirm-same-task '
+            '（启动脚本也支持 --confirm_same_task）。若确有 pick_cup 等其他任务，请先分开数据。')
+    mapping = {src: (0 if task_text is not None else dst) for dst, src in enumerate(usage)}
+    output_tasks = ([{'task_index': 0, 'task': task_text}] if task_text is not None else
+                    [{'task_index': dst, 'task': tasks[src]['task']} for src, dst in mapping.items()])
+    if task_text is not None:
+        print(f'Task in output only: {[tasks[i]["task"] for i in usage]!r} -> {task_text!r}; '
+              f'confirmed_same_task={confirm_same_task}', flush=True)
+    return mapping, output_tasks, summary
+
+
+def output_info(source, episodes, output_tasks):
     fps, chunk = source['fps'], source['chunks_size']
     features = {k: v for k, v in source['features'].items() if k not in CAMERAS}
     for src, dst in CAMERAS.items():
@@ -202,25 +236,22 @@ def output_info(source, episodes, used_tasks):
     count = len(episodes)
     return {'codebase_version': 'v2.1', 'robot_type': source['robot_type'], 'fps': fps, 'chunks_size': chunk,
             'data_path': DATA, 'video_path': VIDEO, 'features': features, 'total_episodes': count,
-            'total_frames': sum(e['length'] for e in episodes), 'total_tasks': len(used_tasks),
+            'total_frames': sum(e['length'] for e in episodes), 'total_tasks': len(output_tasks),
             'total_videos': count * len(CAMERAS), 'total_chunks': math.ceil(count / chunk), 'splits': {'train': f'0:{count}'}}
 
 
 def convert(root, stage, args):
     info, all_episodes, tasks = source_metadata(root)
     fps, chunk = info['fps'], info['chunks_size']
-    if args.task_text is not None and len(tasks) != 1:
-        raise ValueError('--task-text is a single-task correction; refusing to overwrite a multi-task source')
     start = args.start_episode
     selected = all_episodes[start:None if args.limit is None else start + args.limit]
     if not selected:
         raise ValueError('No source episodes selected')
-    if args.task_text is not None:
-        print(f'Task in output only: {tasks[0]["task"]!r} -> {args.task_text!r}', flush=True)
+    task_map, output_tasks, task_usage = plan_tasks(
+        root, info, selected, tasks, args.task_text, args.confirm_same_task)
     meta = stage / 'meta'
     meta.mkdir(parents=True)
     episodes, origins, paths, pairs = [], [], [], []
-    used_tasks = {}  # source task ID -> compact output task ID, including for subsets
     offset, src_offset = 0, sum(e['length'] for e in all_episodes[:start])
     for ep in selected:
         src_id = ep['episode_index']
@@ -230,7 +261,7 @@ def convert(root, stage, args):
             with pq.ParquetFile(src_path) as pf:
                 table, arrays = lowdim(pf, info['features'])
                 src_task, spans = source_spans(arrays, ep, src_offset, fps, tasks, args.max_gap)
-                task = used_tasks.setdefault(src_task, len(used_tasks))
+                task = task_map[src_task]
                 streams = {k: jpeg_rows(pf, k) for k in CAMERAS}
                 for lo, hi, segment, reason in spans:
                     idx, n = len(episodes), hi - lo
@@ -251,7 +282,7 @@ def convert(root, stage, args):
         except Exception as exc:
             raise ValueError(f'{src_path}: {exc}') from exc
         src_offset += ep['length']
-    target = output_info(info, episodes, used_tasks)
+    target = output_info(info, episodes, output_tasks)
     if target['total_frames'] != sum(e['length'] for e in selected):
         raise ValueError('Internal frame accounting mismatch')
     modality = gear.build_modality_json(target, gear.detect_features(target), SLICES, SLICES, task_key=None)
@@ -263,12 +294,16 @@ def convert(root, stage, args):
     write_json(meta / 'info.json', target)
     write_json(meta / 'modality.json', modality)
     write_json(meta / 'embodiment.json', {'embodiment_tag': 'yam'})
-    write_jsonl(meta / 'tasks.jsonl', [{'task_index': dst, 'task': args.task_text or tasks[src]['task']}
-                                       for src, dst in used_tasks.items()])
+    write_jsonl(meta / 'tasks.jsonl', output_tasks)
     write_jsonl(meta / 'episodes.jsonl', episodes)
     write_jsonl(meta / 'source_episodes.jsonl', origins)
     write_json(meta / 'conversion.json', {'source_dataset': root.name, 'source_camera_to_output': CAMERAS,
-                                         'source_fps': fps, 'max_gap_seconds': args.max_gap, 'action_horizon': HORIZON})
+                                         'source_fps': fps, 'max_gap_seconds': args.max_gap, 'action_horizon': HORIZON,
+                                         'task_text': args.task_text, 'confirmed_same_task': args.confirm_same_task,
+                                         'source_task_usage': task_usage,
+                                         'task_mapping': [{'source_task_index': src, 'source_task': tasks[src]['task'],
+                                                           'task_index': dst, 'task': output_tasks[dst]['task']}
+                                                          for src, dst in task_map.items()]})
     # Official stats helper reads the NEW image-free parquets. Never run it on the huge embedded JPEG tables.
     floats = [k for k, f in target['features'].items() if f['dtype'].startswith('float')]
     write_json(meta / 'stats.json', gear.compute_stats(paths, floats))
@@ -282,12 +317,16 @@ def main():
     parser.add_argument('--input', required=True, type=Path, help='committed aloha_record dataset root')
     parser.add_argument('--output', required=True, type=Path, help='NEW sibling/separate output directory')
     task = parser.add_mutually_exclusive_group(required=True)
-    task.add_argument('--task-text', help='explicit instruction replacing the label of a single-task source')
+    task.add_argument('--task-text', help='output instruction; multiple used source labels also require --confirm-same-task')
     task.add_argument('--keep-task-text', action='store_true', help='explicitly keep recorded task text')
+    parser.add_argument('--confirm-same-task', '--confirm_same_task', action='store_true',
+                        help='confirm that ALL selected recordings are the same real task despite different source labels')
     parser.add_argument('--start-episode', type=int, default=0, help='first source episode ID (inclusive)')
     parser.add_argument('--limit', type=int, help='at most this many SOURCE episodes (default: all remaining)')
     parser.add_argument('--max-gap', type=float, default=0.25, help='split at elapsed gaps above this many seconds (replay default: 0.25)')
     args = parser.parse_args()
+    if args.confirm_same_task and args.task_text is None:
+        parser.error('--confirm-same-task requires --task-text; do not use it for genuinely different tasks')
     if args.start_episode < 0 or (args.limit is not None and args.limit < 1):
         parser.error('--start-episode must be nonnegative and --limit positive')
     if args.task_text is not None:
