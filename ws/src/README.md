@@ -5,7 +5,7 @@
 | 目录 | 何时用 | 入口 / 文件 |
 |---|---|---|
 | [`data_prep/`](data_prep/) | 训练前处理数据 | `convert_aloha_to_dreamzero.py` 转格式，`check_aloha_alignment.py` 核对视频、state、action 是否对齐，`prepare_pillow_holdout.py` 按整条录制划分训练/留出。`aloha_video.py` 是视频辅助模块，`requirements-convert.txt` 是转换依赖。 |
-| [`training/`](training/) | 预检、冒烟训练、正式微调 | `train_flip_pillow_lora.py check / smoke / train`。这里的 `smoke` 会跑训练步，不是单元测试。 |
+| [`training/`](training/) | 数据集可选的准备、预检、冒烟训练、正式微调 | 新数据集（如 `data/flip_150`）用 [`launch_pillow_training.sh prepare / check / smoke / train --dataset ...`](training/README.md)；复用底层 `train_flip_pillow_lora.py`。`smoke` 会跑训练步，不是单元测试。 |
 | [`evaluation/`](evaluation/) | 验证模型 / 离线推理 | `compare_pillow_checkpoints.py` 用多 GPU 一次生成同帧视频 + 动作对照网页；`eval_flip_pillow.py` 仅比较动作；`visualize_pillow_eval.py` 把结果生成[离线动作网页](#pillow-eval-report)；`export_pillow_video.py` 用已有 checkpoint 导出[真实/预测视频对照](#pillow-video)。这些脚本不向真机发送动作。 |
 | [`inference/`](inference/) | 在 GPU 服务器部署、让机器人只读取传感器 | [`serve_pillow.py` + `pillow_client.py`：checkpoint-1600 只读推理指南](inference/README.md)。录制帧 / 实时 ROS1 二选一，不向机械臂或底盘发送指令。 |
 | [`monitoring/`](monitoring/) | 看训练日志，不跑模型 | `serve_loss.py` 开本地 loss 网页；`import_loss_to_wandb.py` 将已有 loss 日志导入 W&B。 |
