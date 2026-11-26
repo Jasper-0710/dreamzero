@@ -83,26 +83,37 @@ class Shadow(unittest.TestCase):
 
     def test_http_request_to_prediction(self):
         q, frames = fixture(); body = wire.pack(q, frames)
-        run = Mock(return_value=(np.tile(q, (24,1)), 400., 50.))
-        handler = serve.handler(run, 'checkpoint-1600')
+        run = Mock(return_value=(np.tile(q, (24,1)), 400., 50., 46.))
+        handler = serve.handler(run, 'checkpoint-4000', checkpoint_run='flip_150_lora_4000_swanlab_01',
+                                weight_mode='int8-weight-only')
         # Drive BaseHTTPRequestHandler's real parser/response into a fake socket.
-        def request(path, content, ctype):
+        def request(path, content, ctype, method='POST'):
             conn = Mock(); out = io.BytesIO(); conn.sendall.side_effect = out.write
-            packet = ('POST '+path+' HTTP/1.0\r\nContent-Type: '+ctype+'\r\nContent-Length: '+str(len(content))+'\r\n\r\n').encode() + content
+            packet = (f'{method} {path} HTTP/1.0\r\nContent-Type: {ctype}\r\n'
+                      f'Content-Length: {len(content)}\r\n\r\n').encode() + content
             conn.makefile.return_value = io.BytesIO(packet)
             with patch.object(handler,'log_message'):
                 handler(conn, ('127.0.0.1', 1), object())
             return out.getvalue().split(b'\r\n\r\n', 1)
+        header, health = request('/health', b'', wire.MIME, method='GET')
+        self.assertIn(b' 200 ', header)
+        self.assertEqual(json.loads(health)['action_shape'], [24, 14])
+        run.assert_not_called()
         head, data = request('/predict', body, wire.MIME)
         self.assertIn(b' 200 ', head)
         res = json.loads(data)
-        self.assertEqual((res['checkpoint'],res['mode'],res['action_names']), ('checkpoint-1600','shadow',wire.NAMES))
+        self.assertEqual((res['checkpoint'],res['mode'],res['action_names']), ('checkpoint-4000','shadow',wire.NAMES))
+        for key in ('checkpoint', 'checkpoint_run', 'weight_mode', 'fps'):
+            self.assertEqual(res[key], json.loads(health)[key])
+        self.assertEqual(res['checkpoint_run'], 'flip_150_lora_4000_swanlab_01')
+        self.assertEqual(res['weight_mode'], 'int8-weight-only')
+        self.assertEqual((res['cuda_peak_reserved_gib'], res['cuda_peak_allocated_gib']), (50., 46.))
         np.testing.assert_equal(res['action'], np.tile(q, (24,1)))
         conn = Mock()
         conn.getresponse.return_value.status = 200
         conn.getresponse.return_value.read.return_value = data
         with patch.object(client.http.client, 'HTTPConnection', return_value=conn):
-            self.assertEqual(client.post(8766, body, 'checkpoint-1600')['action'], res['action'])
+            self.assertEqual(client.post(8766, body, 'checkpoint-4000')['action'], res['action'])
             with self.assertRaises(ValueError): client.post(8766, body, 'checkpoint-1200')
         for content, mime in [(b'x',wire.MIME),(body,'application/json')]:
             self.assertIn(b' 400 ', request('/predict',content,mime)[0])

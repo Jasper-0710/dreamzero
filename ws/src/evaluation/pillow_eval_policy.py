@@ -3,7 +3,7 @@ import gc
 import os
 import random
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -125,7 +125,7 @@ def restore(cls, r):
     return model
 
 
-def load_policy(ckpt, verified):
+def load_policy(ckpt, verified, *, int8_weights=False):
     import torch
     from groot.vla.data.schema import EmbodimentTag
     from groot.vla.model.dreamzero.base_vla import VLA
@@ -138,9 +138,22 @@ def load_policy(ckpt, verified):
             raise ValueError(f'Unexpected model path: {path}')
         called.append(True)
         return restore(cls, verified)
-    with patch.object(VLA, 'load_lora', classmethod(loader)):
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(VLA, 'load_lora', classmethod(loader)))
+        if int8_weights:
+            from ws.src.inference.pillow_int8 import quantize_pillow_head
+
+            initialize = VLA.post_initialize
+
+            def pack_then_initialize(model):
+                # This runs after the official FP32 LoRA merge. lazy_load below skips
+                # the earlier whole-model CUDA transfer in GrootSimPolicy.__init__.
+                quantize_pillow_head(model.action_head)
+                initialize(model)
+
+            stack.enter_context(patch.object(VLA, 'post_initialize', pack_then_initialize))
         policy = GrootSimPolicy(embodiment_tag=EmbodimentTag.YAM, model_path=str(ckpt), device='cuda:0',
-                                tokenizer_path_override=str(verified.tokenizer))
+                                tokenizer_path_override=str(verified.tokenizer), lazy_load=int8_weights)
     if (not called or list(policy.video_delta_indices) != [0] or list(policy.state_delta_indices) != [0]
             or list(policy.modality_configs.action.eval_delta_indices) != list(range(H))):
         raise ValueError('Unexpected policy factory or observation horizon')
@@ -170,7 +183,7 @@ def clear_window_cache(head):
 
 
 @contextmanager
-def independent_policy(ckpt, verified, seed):
+def independent_policy(ckpt, verified, seed, *, int8_weights=False):
     """One GPU, no server. Both consumers get exactly the same fresh joint prediction at each anchor."""
     single_gpu_mask()
     import torch._dynamo
@@ -185,7 +198,7 @@ def independent_policy(ckpt, verified, seed):
     with tempfile.TemporaryDirectory(prefix='pillow-eval-') as tmp:
         dist.init_process_group('gloo', init_method=(Path(tmp)/'rdzv').as_uri(), rank=0, world_size=1)
         try:
-            policy = load_policy(ckpt, verified)
+            policy = load_policy(ckpt, verified, int8_weights=int8_weights)
             head = policy.trained_model.action_head
 
             @torch.inference_mode()

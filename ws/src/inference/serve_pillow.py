@@ -51,7 +51,10 @@ def infer(q, frames, layout, predict):
     return action_chunk(batch.act, layout.action)  # official unapply() already restored absolute actions
 
 
-def handler(run, checkpoint):
+def handler(run, checkpoint, *, checkpoint_run=None, weight_mode='bf16'):
+    identity = dict(mode='shadow', checkpoint=checkpoint, checkpoint_run=checkpoint_run,
+                    weight_mode=weight_mode, fps=FPS)
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 20  # bound partial network reads, not inference time
 
@@ -66,7 +69,7 @@ def handler(run, checkpoint):
         def do_GET(self):
             if self.path != '/health':
                 return self.send_error(404)
-            self.reply(200, dict(mode='shadow', checkpoint=checkpoint, task=TASK, fps=FPS, action_shape=[H, 14]))
+            self.reply(200, dict(identity, task=TASK, action_shape=[H, 14]))
 
         def do_POST(self):
             if self.path != '/predict':
@@ -79,12 +82,12 @@ def handler(run, checkpoint):
             except (ValueError, OSError) as exc:
                 return self.send_error(400, str(exc))
             try:
-                action, ms, peak = run(q, frames)
+                action, ms, reserved, allocated = run(q, frames)
             except Exception:
                 traceback.print_exc()
                 return self.send_error(500, 'Inference failed; inspect server log')
-            self.reply(200, dict(mode='shadow', checkpoint=checkpoint, fps=FPS, action_names=NAMES,
-                                 action=action.tolist(), model_ms=ms, cuda_peak_reserved_gib=peak))
+            self.reply(200, dict(identity, action_names=NAMES, action=action.tolist(), model_ms=ms,
+                                 cuda_peak_reserved_gib=reserved, cuda_peak_allocated_gib=allocated))
     return Handler
 
 
@@ -93,11 +96,13 @@ def main():
     p.add_argument('--checkpoint', type=Path, default=Path('checkpoints/flip_pillow_lora_01/checkpoint-1600'))
     p.add_argument('--train-data', type=Path, default=Path('data/flip_the_pillow_dz_train'), help='只读 meta/，不需要视频')
     p.add_argument('--base', type=Path, help='DreamZero-AgiBot 基座，不是 DROID 或 LoRA')
-    p.add_argument('--port', type=int, default=8766)
+    p.add_argument('--port', type=int, default=8766, help='0 由系统分配一个空闲回环端口')
+    p.add_argument('--weight-mode', choices=('bf16', 'int8-weight-only'), default='bf16',
+                   help='DiT 和 T5 Transformer Linear 可选 INT8 权重存储，使用 BF16 计算')
     p.add_argument('--check-only', action='store_true')
     a = p.parse_args()
-    if not 1 <= a.port <= 65535:
-        p.error('port must be 1..65535')
+    if not 0 <= a.port <= 65535:
+        p.error('port must be 0..65535')
     ckpt, train = a.checkpoint.expanduser().resolve(strict=True), a.train_data.expanduser().resolve(strict=True)
     layout = train_layout(train)
     r = recipe(ckpt, train, layout, a.base)
@@ -106,16 +111,19 @@ def main():
         return
     single_gpu_mask()
     import torch
-    with independent_policy(ckpt, r, 1140) as (_, predict):
+    with independent_policy(ckpt, r, 1140, int8_weights=a.weight_mode == 'int8-weight-only') as (_, predict):
         def run(q, frames):
             torch.cuda.synchronize()
             start = time.perf_counter()
             act = infer(q, frames, layout, predict)
             torch.cuda.synchronize()
-            return act, (time.perf_counter() - start) * 1000, torch.cuda.max_memory_reserved() / 2**30
+            return (act, (time.perf_counter() - start) * 1000,
+                    torch.cuda.max_memory_reserved() / 2**30, torch.cuda.max_memory_allocated() / 2**30)
         # Single-threaded: the model's cache/seed are reset per prediction; no shared concurrent calls.
-        with HTTPServer(('127.0.0.1', a.port), handler(run, ckpt.name)) as server:
-            print(f'READY: {ckpt.name} / {torch.cuda.get_device_name(0)} / 127.0.0.1:{a.port} / shadow only', flush=True)
+        with HTTPServer(('127.0.0.1', a.port), handler(run, ckpt.name, checkpoint_run=ckpt.parent.name,
+                                                      weight_mode=a.weight_mode)) as server:
+            print(f'READY: {ckpt} / {a.weight_mode} / {torch.cuda.get_device_name(0)} / '
+                  f'127.0.0.1:{server.server_port} / shadow only', flush=True)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
